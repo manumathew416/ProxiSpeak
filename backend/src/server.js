@@ -3,6 +3,7 @@ const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const dotenv = require("dotenv");
+const connectDB = require("./config/database");
 
 dotenv.config();
 
@@ -47,6 +48,18 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, () => {
-    console.log(`ProxiSpeak server running on http://localhost:${PORT}`);
-});
+const startServer = async () => {
+    try {
+        await connectDB();
+
+        server.listen(PORT, () => {
+            console.log(
+                `ProxiSpeak server running on http://localhost:${PORT}`
+            );
+        });
+    } catch (error) {
+        console.error("Failed to start server:", error.message);
+    }
+};
+
+startServer();
