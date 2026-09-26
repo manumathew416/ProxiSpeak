@@ -4,6 +4,7 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const dotenv = require("dotenv");
 const connectDB = require("./config/database");
+const userRoutes = require("./routes/userRoutes");
 
 dotenv.config();
 
@@ -12,6 +13,8 @@ const server = http.createServer(app);
 
 app.use(cors());
 app.use(express.json());
+
+app.use("/api/users", userRoutes);
 
 const io = new Server(server, {
     cors: {
