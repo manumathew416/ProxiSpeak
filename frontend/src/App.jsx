@@ -11,23 +11,56 @@ function App() {
         y: 250
     });
 
+    const [otherUsers, setOtherUsers] = useState({});
+
+    // Draw the canvas
     useEffect(() => {
         const canvas = canvasRef.current;
         const context = canvas.getContext("2d");
 
         context.clearRect(0, 0, canvas.width, canvas.height);
 
+        // Background
         context.fillStyle = "#f2f2f2";
         context.fillRect(0, 0, canvas.width, canvas.height);
 
+        // Draw our avatar
         context.beginPath();
         context.arc(position.x, position.y, 20, 0, Math.PI * 2);
         context.fillStyle = "#2563eb";
         context.fill();
-
         context.closePath();
-    }, [position]);
 
+        // Draw other users
+        Object.values(otherUsers).forEach((user) => {
+            context.beginPath();
+            context.arc(user.x, user.y, 20, 0, Math.PI * 2);
+            context.fillStyle = "#ef4444";
+            context.fill();
+            context.closePath();
+        });
+    }, [position, otherUsers]);
+
+    // Receive movement from other users
+    useEffect(() => {
+        const handleAvatarMoved = (data) => {
+            setOtherUsers((currentUsers) => ({
+                ...currentUsers,
+                [data.userId]: {
+                    x: data.x,
+                    y: data.y
+                }
+            }));
+        };
+
+        socket.on("avatar:moved", handleAvatarMoved);
+
+        return () => {
+            socket.off("avatar:moved", handleAvatarMoved);
+        };
+    }, []);
+
+    // Keyboard movement
     useEffect(() => {
         const handleKeyDown = (event) => {
             setPosition((currentPosition) => {
@@ -78,7 +111,9 @@ function App() {
         <div>
             <h1>ProxiSpeak</h1>
 
-            <p>Use the arrow keys to move your avatar.</p>
+            <p>
+                Use the arrow keys to move your avatar.
+            </p>
 
             <canvas
                 ref={canvasRef}
