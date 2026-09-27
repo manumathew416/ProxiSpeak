@@ -4,7 +4,7 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 const dotenv = require("dotenv");
 const connectDB = require("./config/database");
-const userRoutes = require("./routes/userRoutes");
+const User = require("./models/user");
 
 dotenv.config();
 
@@ -13,8 +13,6 @@ const server = http.createServer(app);
 
 app.use(cors());
 app.use(express.json());
-
-app.use("/api/users", userRoutes);
 
 const io = new Server(server, {
     cors: {
@@ -31,23 +29,62 @@ app.get("/api/health", (req, res) => {
 });
 
 // Socket.io connection
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
     console.log(`User connected: ${socket.id}`);
 
-    socket.on("avatar:move", (data) => {
-        console.log("Avatar movement:", data);
-
-        socket.broadcast.emit("avatar:moved", {
-            userId: socket.id,
-            x: data.x,
-            y: data.y
+    try {
+        const user = await User.create({
+            socketId: socket.id,
+            username: `User-${socket.id.slice(0, 5)}`,
+            position: {
+                type: "Point",
+                coordinates: [400, 250]
+            }
         });
-    });
+
+        console.log(`User saved: ${user.username}`);
+
+        socket.on("avatar:move", async (data) => {
+            const { x, y } = data;
+
+            if (typeof x !== "number" || typeof y !== "number") {
+                return;
+            }
+
+            await User.findOneAndUpdate(
+                { socketId: socket.id },
+                {
+                    position: {
+                        type: "Point",
+                        coordinates: [x, y]
+                    }
+                }
+            );
+
+            socket.broadcast.emit("avatar:moved", {
+                userId: socket.id,
+                username: user.username,
+                x,
+                y
+            });
+        });
+
+        socket.on("disconnect", async () => {
+            console.log(`User disconnected: ${socket.id}`);
+
+            await User.findOneAndDelete({
+                socketId: socket.id
+            });
+        });
+
+    } catch (error) {
+        console.error("Socket user error:", error.message);
+    }
+});
 
     socket.on("disconnect", () => {
         console.log(`User disconnected: ${socket.id}`);
     });
-});
 
 const PORT = process.env.PORT || 5000;
 
