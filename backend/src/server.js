@@ -82,10 +82,6 @@ io.on("connection", async (socket) => {
     }
 });
 
-    socket.on("disconnect", () => {
-        console.log(`User disconnected: ${socket.id}`);
-    });
-
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
