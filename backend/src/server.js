@@ -36,10 +36,7 @@ io.on("connection", async (socket) => {
         const user = await User.create({
             socketId: socket.id,
             username: `User-${socket.id.slice(0, 5)}`,
-            position: {
-                type: "Point",
-                coordinates: [400, 250]
-            }
+            position: [400, 250]
         });
 
         console.log(`User saved: ${user.username}`);
@@ -54,10 +51,7 @@ io.on("connection", async (socket) => {
             await User.findOneAndUpdate(
                 { socketId: socket.id },
                 {
-                    position: {
-                        type: "Point",
-                        coordinates: [x, y]
-                    }
+                    position: [x, y]
                 }
             );
 
