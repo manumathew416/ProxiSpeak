@@ -66,17 +66,12 @@ io.on("connection", async (socket) => {
 
     // Find nearby users within 100 pixels
     const nearbyUsers = await User.find({
-        socketId: { $ne: socket.id },
-        position: {
-            $near: {
-                $geometry: {
-                    type: "Point",
-                    coordinates: [x, y]
-                },
-                $maxDistance: 100
-            }
-        }
-    });
+    socketId: { $ne: socket.id },
+    position: {
+        $near: [x, y],
+        $maxDistance: 100
+    }
+});
 
     // Send nearby users to the current user
     socket.emit("proximity:update", {
