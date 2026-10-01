@@ -13,6 +13,8 @@ function App() {
 
     const [otherUsers, setOtherUsers] = useState({});
     const [nearbyUsers, setNearbyUsers] = useState([]);
+    const [isMicOn, setIsMicOn] = useState(false);
+    const [localStream, setLocalStream] = useState(null);
 
     // Draw the virtual office
     useEffect(() => {
