@@ -12,8 +12,9 @@ function App() {
     });
 
     const [otherUsers, setOtherUsers] = useState({});
+    const [nearbyUsers, setNearbyUsers] = useState([]);
 
-    // Draw the canvas
+    // Draw the virtual office
     useEffect(() => {
         const canvas = canvasRef.current;
         const context = canvas.getContext("2d");
@@ -23,6 +24,13 @@ function App() {
         // Background
         context.fillStyle = "#f2f2f2";
         context.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw proximity radius
+        context.beginPath();
+        context.arc(position.x, position.y, 100, 0, Math.PI * 2);
+        context.strokeStyle = "rgba(37, 99, 235, 0.3)";
+        context.stroke();
+        context.closePath();
 
         // Draw our avatar
         context.beginPath();
@@ -35,11 +43,18 @@ function App() {
         Object.values(otherUsers).forEach((user) => {
             context.beginPath();
             context.arc(user.x, user.y, 20, 0, Math.PI * 2);
-            context.fillStyle = "#ef4444";
+
+            // Green if nearby, red otherwise
+            const isNearby = nearbyUsers.some(
+                (nearbyUser) => nearbyUser.userId === user.userId
+            );
+
+            context.fillStyle = isNearby ? "#22c55e" : "#ef4444";
             context.fill();
+
             context.closePath();
         });
-    }, [position, otherUsers]);
+    }, [position, otherUsers, nearbyUsers]);
 
     // Receive movement from other users
     useEffect(() => {
@@ -47,6 +62,8 @@ function App() {
             setOtherUsers((currentUsers) => ({
                 ...currentUsers,
                 [data.userId]: {
+                    userId: data.userId,
+                    username: data.username,
                     x: data.x,
                     y: data.y
                 }
@@ -57,6 +74,19 @@ function App() {
 
         return () => {
             socket.off("avatar:moved", handleAvatarMoved);
+        };
+    }, []);
+
+    // Receive proximity updates
+    useEffect(() => {
+        const handleProximityUpdate = (data) => {
+            setNearbyUsers(data.nearbyUsers || []);
+        };
+
+        socket.on("proximity:update", handleProximityUpdate);
+
+        return () => {
+            socket.off("proximity:update", handleProximityUpdate);
         };
     }, []);
 
@@ -114,6 +144,24 @@ function App() {
             <p>
                 Use the arrow keys to move your avatar.
             </p>
+
+            <p>
+                Nearby users: <strong>{nearbyUsers.length}</strong>
+            </p>
+
+            {nearbyUsers.length > 0 && (
+                <div>
+                    <strong>Users within 100 pixels:</strong>
+
+                    <ul>
+                        {nearbyUsers.map((user) => (
+                            <li key={user.userId}>
+                                {user.username}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
 
             <canvas
                 ref={canvasRef}
