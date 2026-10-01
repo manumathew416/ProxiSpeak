@@ -42,18 +42,52 @@ io.on("connection", async (socket) => {
         console.log(`User saved: ${user.username}`);
 
         socket.on("avatar:move", async (data) => {
-            const { x, y } = data;
+    const { x, y } = data;
 
-            if (typeof x !== "number" || typeof y !== "number") {
-                return;
+    if (typeof x !== "number" || typeof y !== "number") {
+        return;
+    }
+
+    // Update current user's position
+    await User.findOneAndUpdate(
+        { socketId: socket.id },
+        {
+            position: [x, y]
+        }
+    );
+
+    // Broadcast movement to other users
+    socket.broadcast.emit("avatar:moved", {
+        userId: socket.id,
+        username: user.username,
+        x,
+        y
+    });
+
+    // Find nearby users within 100 pixels
+    const nearbyUsers = await User.find({
+        socketId: { $ne: socket.id },
+        position: {
+            $near: {
+                $geometry: {
+                    type: "Point",
+                    coordinates: [x, y]
+                },
+                $maxDistance: 100
             }
+        }
+    });
 
-            await User.findOneAndUpdate(
-                { socketId: socket.id },
-                {
-                    position: [x, y]
-                }
-            );
+    // Send nearby users to the current user
+    socket.emit("proximity:update", {
+        nearbyUsers: nearbyUsers.map((nearbyUser) => ({
+            userId: nearbyUser.socketId,
+            username: nearbyUser.username,
+            x: nearbyUser.position[0],
+            y: nearbyUser.position[1]
+        }))
+    });
+});
 
             socket.broadcast.emit("avatar:moved", {
                 userId: socket.id,
