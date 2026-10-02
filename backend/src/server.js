@@ -100,6 +100,30 @@ io.on("connection", async (socket) => {
             }
         });
 
+        // WebRTC offer
+socket.on("webrtc:offer", ({ targetUserId, offer }) => {
+    io.to(targetUserId).emit("webrtc:offer", {
+        senderUserId: socket.id,
+        offer
+    });
+});
+
+// WebRTC answer
+socket.on("webrtc:answer", ({ targetUserId, answer }) => {
+    io.to(targetUserId).emit("webrtc:answer", {
+        senderUserId: socket.id,
+        answer
+    });
+});
+
+// WebRTC ICE candidate
+socket.on("webrtc:ice-candidate", ({ targetUserId, candidate }) => {
+    io.to(targetUserId).emit("webrtc:ice-candidate", {
+        senderUserId: socket.id,
+        candidate
+    });
+});
+
         socket.on("disconnect", async () => {
             console.log(`User disconnected: ${socket.id}`);
 
