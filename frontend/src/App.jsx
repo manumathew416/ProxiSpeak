@@ -5,6 +5,8 @@ const socket = io("http://localhost:5000");
 
 function App() {
     const canvasRef = useRef(null);
+    const peerConnections = useRef({});
+    const remoteAudioRefs = useRef({});
 
     const [position, setPosition] = useState({
         x: 400,
