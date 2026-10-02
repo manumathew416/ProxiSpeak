@@ -5,6 +5,7 @@ const socket = io("http://localhost:5000");
 
 function App() {
     const canvasRef = useRef(null);
+
     const peerConnections = useRef({});
     const remoteAudioRefs = useRef({});
 
@@ -18,6 +19,102 @@ function App() {
 
     const [isMicOn, setIsMicOn] = useState(false);
     const [localStream, setLocalStream] = useState(null);
+
+    const rtcConfiguration = {
+        iceServers: [
+            {
+                urls: "stun:stun.l.google.com:19302"
+            }
+        ]
+    };
+
+    // Create WebRTC peer connection
+    const createPeerConnection = async (
+        userId,
+        stream,
+        createOffer = false
+    ) => {
+        if (peerConnections.current[userId]) {
+            return peerConnections.current[userId];
+        }
+
+        const peerConnection =
+            new RTCPeerConnection(rtcConfiguration);
+
+        peerConnections.current[userId] =
+            peerConnection;
+
+        // Add microphone tracks
+        stream.getTracks().forEach((track) => {
+            peerConnection.addTrack(
+                track,
+                stream
+            );
+        });
+
+        // Send ICE candidates
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit(
+                    "webrtc:ice-candidate",
+                    {
+                        targetUserId: userId,
+                        candidate: event.candidate
+                    }
+                );
+            }
+        };
+
+        // Receive remote audio
+        peerConnection.ontrack = (event) => {
+            const [remoteStream] = event.streams;
+
+            let audio =
+                remoteAudioRefs.current[userId];
+
+            if (!audio) {
+                audio = new Audio();
+                audio.autoplay = true;
+
+                remoteAudioRefs.current[userId] =
+                    audio;
+            }
+
+            audio.srcObject = remoteStream;
+
+            audio.play().catch((error) => {
+                console.log(
+                    "Remote audio playback waiting for user interaction:",
+                    error
+                );
+            });
+        };
+
+        // Monitor connection state
+        peerConnection.onconnectionstatechange = () => {
+            console.log(
+                `WebRTC connection with ${userId}:`,
+                peerConnection.connectionState
+            );
+        };
+
+        // Create offer
+        if (createOffer) {
+            const offer =
+                await peerConnection.createOffer();
+
+            await peerConnection.setLocalDescription(
+                offer
+            );
+
+            socket.emit("webrtc:offer", {
+                targetUserId: userId,
+                offer
+            });
+        }
+
+        return peerConnection;
+    };
 
     // Draw the virtual office
     useEffect(() => {
@@ -45,7 +142,7 @@ function App() {
             canvas.height
         );
 
-        // Draw proximity radius
+        // Proximity radius
         context.beginPath();
 
         context.arc(
@@ -62,7 +159,7 @@ function App() {
         context.stroke();
         context.closePath();
 
-        // Draw our avatar
+        // Current user
         context.beginPath();
 
         context.arc(
@@ -78,7 +175,7 @@ function App() {
 
         context.closePath();
 
-        // Draw other users
+        // Other users
         Object.values(otherUsers).forEach((user) => {
             context.beginPath();
 
@@ -92,7 +189,8 @@ function App() {
 
             const isNearby = nearbyUsers.some(
                 (nearbyUser) =>
-                    nearbyUser.userId === user.userId
+                    nearbyUser.userId ===
+                    user.userId
             );
 
             context.fillStyle = isNearby
@@ -103,7 +201,11 @@ function App() {
 
             context.closePath();
         });
-    }, [position, otherUsers, nearbyUsers]);
+    }, [
+        position,
+        otherUsers,
+        nearbyUsers
+    ]);
 
     // Receive movement from other users
     useEffect(() => {
@@ -134,10 +236,31 @@ function App() {
 
     // Receive proximity updates
     useEffect(() => {
-        const handleProximityUpdate = (data) => {
-            setNearbyUsers(
-                data.nearbyUsers || []
-            );
+        const handleProximityUpdate = async (data) => {
+            const users =
+                data.nearbyUsers || [];
+
+            setNearbyUsers(users);
+
+            // Don't start WebRTC without microphone
+            if (!localStream) {
+                return;
+            }
+
+            // Connect to nearby users
+            for (const user of users) {
+                if (
+                    !peerConnections.current[
+                        user.userId
+                    ]
+                ) {
+                    await createPeerConnection(
+                        user.userId,
+                        localStream,
+                        true
+                    );
+                }
+            }
         };
 
         socket.on(
@@ -151,12 +274,121 @@ function App() {
                 handleProximityUpdate
             );
         };
-    }, []);
+    }, [localStream]);
+
+    // WebRTC signaling
+    useEffect(() => {
+        const handleOffer = async ({
+            senderUserId,
+            offer
+        }) => {
+            if (!localStream) {
+                return;
+            }
+
+            const peerConnection =
+                await createPeerConnection(
+                    senderUserId,
+                    localStream,
+                    false
+                );
+
+            await peerConnection.setRemoteDescription(
+                new RTCSessionDescription(offer)
+            );
+
+            const answer =
+                await peerConnection.createAnswer();
+
+            await peerConnection.setLocalDescription(
+                answer
+            );
+
+            socket.emit("webrtc:answer", {
+                targetUserId: senderUserId,
+                answer
+            });
+        };
+
+        const handleAnswer = async ({
+            senderUserId,
+            answer
+        }) => {
+            const peerConnection =
+                peerConnections.current[
+                    senderUserId
+                ];
+
+            if (!peerConnection) {
+                return;
+            }
+
+            await peerConnection.setRemoteDescription(
+                new RTCSessionDescription(answer)
+            );
+        };
+
+        const handleIceCandidate = async ({
+            senderUserId,
+            candidate
+        }) => {
+            const peerConnection =
+                peerConnections.current[
+                    senderUserId
+                ];
+
+            if (!peerConnection) {
+                return;
+            }
+
+            try {
+                await peerConnection.addIceCandidate(
+                    new RTCIceCandidate(candidate)
+                );
+            } catch (error) {
+                console.error(
+                    "ICE candidate error:",
+                    error
+                );
+            }
+        };
+
+        socket.on(
+            "webrtc:offer",
+            handleOffer
+        );
+
+        socket.on(
+            "webrtc:answer",
+            handleAnswer
+        );
+
+        socket.on(
+            "webrtc:ice-candidate",
+            handleIceCandidate
+        );
+
+        return () => {
+            socket.off(
+                "webrtc:offer",
+                handleOffer
+            );
+
+            socket.off(
+                "webrtc:answer",
+                handleAnswer
+            );
+
+            socket.off(
+                "webrtc:ice-candidate",
+                handleIceCandidate
+            );
+        };
+    }, [localStream]);
 
     // Keyboard movement
     useEffect(() => {
         const handleKeyDown = (event) => {
-            // Prevent browser scrolling
             if (
                 event.key === "ArrowUp" ||
                 event.key === "ArrowDown" ||
@@ -167,8 +399,11 @@ function App() {
             }
 
             setPosition((currentPosition) => {
-                let newX = currentPosition.x;
-                let newY = currentPosition.y;
+                let newX =
+                    currentPosition.x;
+
+                let newY =
+                    currentPosition.y;
 
                 const movement = 10;
 
@@ -199,7 +434,6 @@ function App() {
                     Math.min(480, newY)
                 );
 
-                // Send new position to backend
                 socket.emit("avatar:move", {
                     x: newX,
                     y: newY
@@ -248,6 +482,14 @@ function App() {
 
             // Turn microphone OFF
             else {
+                Object.values(
+                    peerConnections.current
+                ).forEach((peerConnection) => {
+                    peerConnection.close();
+                });
+
+                peerConnections.current = {};
+
                 if (localStream) {
                     localStream
                         .getTracks()
@@ -276,8 +518,8 @@ function App() {
             <h1>ProxiSpeak</h1>
 
             <p>
-                Use the arrow keys to move your
-                avatar.
+                Use the arrow keys to move
+                your avatar.
             </p>
 
             <p>
