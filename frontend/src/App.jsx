@@ -3,33 +3,37 @@ import { io } from "socket.io-client";
 
 const socket = io("http://localhost:5000");
 
+const RTC_CONFIGURATION = {
+    iceServers: [
+        {
+            urls: "stun:stun.l.google.com:19302",
+        },
+    ],
+};
+
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 500;
+const PROXIMITY_RADIUS = 100;
+const AVATAR_RADIUS = 20;
+
 function App() {
     const canvasRef = useRef(null);
-
     const peerConnections = useRef({});
     const remoteAudioRefs = useRef({});
+    const localStreamRef = useRef(null);
 
     const [position, setPosition] = useState({
         x: 400,
-        y: 250
+        y: 250,
     });
 
     const [otherUsers, setOtherUsers] = useState({});
     const [nearbyUsers, setNearbyUsers] = useState([]);
-
     const [isMicOn, setIsMicOn] = useState(false);
-    const [localStream, setLocalStream] = useState(null);
+    const [errorMessage, setErrorMessage] = useState("");
 
-    const rtcConfiguration = {
-        iceServers: [
-            {
-                urls: "stun:stun.l.google.com:19302"
-            }
-        ]
-    };
-
-    // Create WebRTC peer connection
-    const createPeerConnection = async (
+    // Create a WebRTC peer connection for another user.
+    const createPeerConnection = (
         userId,
         stream,
         createOffer = false
@@ -38,134 +42,157 @@ function App() {
             return peerConnections.current[userId];
         }
 
-        const peerConnection =
-            new RTCPeerConnection(rtcConfiguration);
+        const peerConnection = new RTCPeerConnection(
+            RTC_CONFIGURATION
+        );
 
-        peerConnections.current[userId] =
-            peerConnection;
+        peerConnections.current[userId] = peerConnection;
 
-        // Add microphone tracks
         stream.getTracks().forEach((track) => {
-            peerConnection.addTrack(
-                track,
-                stream
-            );
+            peerConnection.addTrack(track, stream);
         });
 
-        // Send ICE candidates
         peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
-                socket.emit(
-                    "webrtc:ice-candidate",
-                    {
-                        targetUserId: userId,
-                        candidate: event.candidate
-                    }
-                );
+                socket.emit("webrtc:ice-candidate", {
+                    targetUserId: userId,
+                    candidate: event.candidate,
+                });
             }
         };
 
-        // Receive remote audio
         peerConnection.ontrack = (event) => {
-            const [remoteStream] = event.streams;
+            const remoteStream = event.streams[0];
 
-            let audio =
-                remoteAudioRefs.current[userId];
+            if (!remoteStream) return;
+
+            let audio = remoteAudioRefs.current[userId];
 
             if (!audio) {
                 audio = new Audio();
                 audio.autoplay = true;
+                audio.playsInline = true;
 
-                remoteAudioRefs.current[userId] =
-                    audio;
+                remoteAudioRefs.current[userId] = audio;
             }
 
             audio.srcObject = remoteStream;
 
             audio.play().catch((error) => {
-                console.log(
-                    "Remote audio playback waiting for user interaction:",
-                    error
+                console.warn(
+                    "Remote audio playback requires interaction:",
+                    error.message
                 );
             });
         };
 
-        // Monitor connection state
         peerConnection.onconnectionstatechange = () => {
             console.log(
                 `WebRTC connection with ${userId}:`,
                 peerConnection.connectionState
             );
+
+            if (
+                peerConnection.connectionState === "failed" ||
+                peerConnection.connectionState === "closed"
+            ) {
+                cleanupPeerConnection(userId);
+            }
         };
 
-        // Create offer
         if (createOffer) {
-            const offer =
-                await peerConnection.createOffer();
-
-            await peerConnection.setLocalDescription(
-                offer
-            );
-
-            socket.emit("webrtc:offer", {
-                targetUserId: userId,
-                offer
-            });
+            // Create the offer asynchronously.
+            makeOffer(peerConnection, userId);
         }
 
         return peerConnection;
     };
 
-    // Draw the virtual office
+    // Create and send a WebRTC offer.
+    const makeOffer = async (peerConnection, userId) => {
+        try {
+            const offer = await peerConnection.createOffer();
+
+            await peerConnection.setLocalDescription(offer);
+
+            socket.emit("webrtc:offer", {
+                targetUserId: userId,
+                offer: peerConnection.localDescription,
+            });
+        } catch (error) {
+            console.error("Could not create WebRTC offer:", error);
+        }
+    };
+
+    // Clean up one user's audio connection.
+    const cleanupPeerConnection = (userId) => {
+        const peerConnection = peerConnections.current[userId];
+
+        if (peerConnection) {
+            peerConnection.ontrack = null;
+            peerConnection.onicecandidate = null;
+            peerConnection.onconnectionstatechange = null;
+            peerConnection.close();
+
+            delete peerConnections.current[userId];
+        }
+
+        const audio = remoteAudioRefs.current[userId];
+
+        if (audio) {
+            audio.pause();
+            audio.srcObject = null;
+
+            delete remoteAudioRefs.current[userId];
+        }
+    };
+
+    // Draw the virtual world and avatars.
     useEffect(() => {
         const canvas = canvasRef.current;
 
-        if (!canvas) {
-            return;
-        }
+        if (!canvas) return;
 
         const context = canvas.getContext("2d");
 
         context.clearRect(
             0,
             0,
-            canvas.width,
-            canvas.height
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT
         );
 
-        // Background
         context.fillStyle = "#f2f2f2";
+
         context.fillRect(
             0,
             0,
-            canvas.width,
-            canvas.height
+            CANVAS_WIDTH,
+            CANVAS_HEIGHT
         );
 
-        // Proximity radius
+        // Draw local user's proximity radius.
         context.beginPath();
 
         context.arc(
             position.x,
             position.y,
-            100,
+            PROXIMITY_RADIUS,
             0,
             Math.PI * 2
         );
 
-        context.strokeStyle =
-            "rgba(37, 99, 235, 0.3)";
-
+        context.strokeStyle = "rgba(37, 99, 235, 0.4)";
+        context.lineWidth = 2;
         context.stroke();
-        context.closePath();
 
-        // Current user
+        // Draw local avatar.
         context.beginPath();
 
         context.arc(
             position.x,
             position.y,
-            20,
+            AVATAR_RADIUS,
             0,
             Math.PI * 2
         );
@@ -175,39 +202,40 @@ function App() {
 
         context.closePath();
 
-        // Other users
+        // Draw other users.
         Object.values(otherUsers).forEach((user) => {
+            const isNearby = nearbyUsers.some(
+                (nearbyUser) => nearbyUser.userId === user.userId
+            );
+
             context.beginPath();
 
             context.arc(
                 user.x,
                 user.y,
-                20,
+                AVATAR_RADIUS,
                 0,
                 Math.PI * 2
             );
 
-            const isNearby = nearbyUsers.some(
-                (nearbyUser) =>
-                    nearbyUser.userId ===
-                    user.userId
-            );
-
-            context.fillStyle = isNearby
-                ? "#22c55e"
-                : "#ef4444";
-
+            context.fillStyle = isNearby ? "#22c55e" : "#ef4444";
             context.fill();
 
             context.closePath();
-        });
-    }, [
-        position,
-        otherUsers,
-        nearbyUsers
-    ]);
 
-    // Receive movement from other users
+            context.fillStyle = "#111827";
+            context.font = "12px Arial";
+            context.textAlign = "center";
+
+            context.fillText(
+                user.username,
+                user.x,
+                user.y - AVATAR_RADIUS - 8
+            );
+        });
+    }, [position, otherUsers, nearbyUsers]);
+
+    // Receive movement updates from other users.
     useEffect(() => {
         const handleAvatarMoved = (data) => {
             setOtherUsers((currentUsers) => ({
@@ -216,358 +244,316 @@ function App() {
                     userId: data.userId,
                     username: data.username,
                     x: data.x,
-                    y: data.y
-                }
+                    y: data.y,
+                },
             }));
         };
 
-        socket.on(
-            "avatar:moved",
-            handleAvatarMoved
-        );
+        socket.on("avatar:moved", handleAvatarMoved);
 
         return () => {
-            socket.off(
-                "avatar:moved",
-                handleAvatarMoved
-            );
+            socket.off("avatar:moved", handleAvatarMoved);
         };
     }, []);
 
-    // Receive proximity updates
+    // Remove disconnected avatars and their audio connections.
+    useEffect(() => {
+        const handleAvatarLeft = ({ userId }) => {
+            setOtherUsers((currentUsers) => {
+                const updatedUsers = { ...currentUsers };
+
+                delete updatedUsers[userId];
+
+                return updatedUsers;
+            });
+
+            setNearbyUsers((currentUsers) =>
+                currentUsers.filter(
+                    (user) => user.userId !== userId
+                )
+            );
+
+            cleanupPeerConnection(userId);
+
+            console.log("User left the virtual office:", userId);
+        };
+
+        socket.on("avatar:left", handleAvatarLeft);
+
+        return () => {
+            socket.off("avatar:left", handleAvatarLeft);
+        };
+    }, []);
+
+    // Receive proximity updates and establish connections with nearby users.
     useEffect(() => {
         const handleProximityUpdate = async (data) => {
-            const users =
-                data.nearbyUsers || [];
+            const users = data.nearbyUsers || [];
 
             setNearbyUsers(users);
 
-            // Don't start WebRTC without microphone
-            if (!localStream) {
-                return;
-            }
+            const nearbyIds = new Set(
+                users.map((user) => user.userId)
+            );
 
-            // Connect to nearby users
+            // Close audio connections when users are no longer nearby.
+            Object.keys(peerConnections.current).forEach((userId) => {
+                if (!nearbyIds.has(userId)) {
+                    cleanupPeerConnection(userId);
+                }
+            });
+
+            const stream = localStreamRef.current;
+
+            if (!stream) return;
+
             for (const user of users) {
-                if (
-                    !peerConnections.current[
-                        user.userId
-                    ]
-                ) {
-                    await createPeerConnection(
+                if (!peerConnections.current[user.userId]) {
+                    createPeerConnection(
                         user.userId,
-                        localStream,
+                        stream,
                         true
                     );
                 }
             }
         };
 
-        socket.on(
-            "proximity:update",
-            handleProximityUpdate
-        );
+        socket.on("proximity:update", handleProximityUpdate);
 
         return () => {
-            socket.off(
-                "proximity:update",
-                handleProximityUpdate
-            );
+            socket.off("proximity:update", handleProximityUpdate);
         };
-    }, [localStream]);
+    }, []);
 
-    // WebRTC signaling
+    // Handle incoming WebRTC offers, answers, and ICE candidates.
     useEffect(() => {
-        const handleOffer = async ({
-            senderUserId,
-            offer
-        }) => {
-            if (!localStream) {
+        const handleOffer = async ({ senderUserId, offer }) => {
+            const stream = localStreamRef.current;
+
+            if (!stream) {
+                console.warn(
+                    "Cannot answer WebRTC offer: microphone is off."
+                );
                 return;
             }
 
-            const peerConnection =
-                await createPeerConnection(
+            try {
+                const peerConnection = createPeerConnection(
                     senderUserId,
-                    localStream,
-                    false
+                    stream
                 );
 
-            await peerConnection.setRemoteDescription(
-                new RTCSessionDescription(offer)
-            );
+                await peerConnection.setRemoteDescription(
+                    new RTCSessionDescription(offer)
+                );
 
-            const answer =
-                await peerConnection.createAnswer();
+                const answer = await peerConnection.createAnswer();
 
-            await peerConnection.setLocalDescription(
-                answer
-            );
+                await peerConnection.setLocalDescription(answer);
 
-            socket.emit("webrtc:answer", {
-                targetUserId: senderUserId,
-                answer
-            });
+                socket.emit("webrtc:answer", {
+                    targetUserId: senderUserId,
+                    answer: peerConnection.localDescription,
+                });
+            } catch (error) {
+                console.error("Error handling WebRTC offer:", error);
+            }
         };
 
-        const handleAnswer = async ({
-            senderUserId,
-            answer
-        }) => {
+        const handleAnswer = async ({ senderUserId, answer }) => {
             const peerConnection =
-                peerConnections.current[
-                    senderUserId
-                ];
+                peerConnections.current[senderUserId];
 
-            if (!peerConnection) {
-                return;
+            if (!peerConnection) return;
+
+            try {
+                await peerConnection.setRemoteDescription(
+                    new RTCSessionDescription(answer)
+                );
+            } catch (error) {
+                console.error("Error handling WebRTC answer:", error);
             }
-
-            await peerConnection.setRemoteDescription(
-                new RTCSessionDescription(answer)
-            );
         };
 
         const handleIceCandidate = async ({
             senderUserId,
-            candidate
+            candidate,
         }) => {
             const peerConnection =
-                peerConnections.current[
-                    senderUserId
-                ];
+                peerConnections.current[senderUserId];
 
-            if (!peerConnection) {
-                return;
-            }
+            if (!peerConnection || !candidate) return;
 
             try {
                 await peerConnection.addIceCandidate(
                     new RTCIceCandidate(candidate)
                 );
             } catch (error) {
-                console.error(
-                    "ICE candidate error:",
-                    error
-                );
+                console.error("Error adding ICE candidate:", error);
             }
         };
 
-        socket.on(
-            "webrtc:offer",
-            handleOffer
-        );
-
-        socket.on(
-            "webrtc:answer",
-            handleAnswer
-        );
-
-        socket.on(
-            "webrtc:ice-candidate",
-            handleIceCandidate
-        );
+        socket.on("webrtc:offer", handleOffer);
+        socket.on("webrtc:answer", handleAnswer);
+        socket.on("webrtc:ice-candidate", handleIceCandidate);
 
         return () => {
-            socket.off(
-                "webrtc:offer",
-                handleOffer
-            );
-
-            socket.off(
-                "webrtc:answer",
-                handleAnswer
-            );
-
+            socket.off("webrtc:offer", handleOffer);
+            socket.off("webrtc:answer", handleAnswer);
             socket.off(
                 "webrtc:ice-candidate",
                 handleIceCandidate
             );
         };
-    }, [localStream]);
+    }, []);
 
-    // Keyboard movement
+    // Keyboard-based avatar movement.
     useEffect(() => {
         const handleKeyDown = (event) => {
-            if (
-                event.key === "ArrowUp" ||
-                event.key === "ArrowDown" ||
-                event.key === "ArrowLeft" ||
-                event.key === "ArrowRight"
-            ) {
-                event.preventDefault();
-            }
+            const movements = {
+                ArrowUp: [0, -10],
+                ArrowDown: [0, 10],
+                ArrowLeft: [-10, 0],
+                ArrowRight: [10, 0],
+            };
+
+            const movement = movements[event.key];
+
+            if (!movement) return;
+
+            event.preventDefault();
 
             setPosition((currentPosition) => {
-                let newX =
-                    currentPosition.x;
-
-                let newY =
-                    currentPosition.y;
-
-                const movement = 10;
-
-                if (event.key === "ArrowUp") {
-                    newY -= movement;
-                }
-
-                if (event.key === "ArrowDown") {
-                    newY += movement;
-                }
-
-                if (event.key === "ArrowLeft") {
-                    newX -= movement;
-                }
-
-                if (event.key === "ArrowRight") {
-                    newX += movement;
-                }
-
-                // Keep avatar inside canvas
-                newX = Math.max(
-                    20,
-                    Math.min(780, newX)
+                const x = Math.max(
+                    AVATAR_RADIUS,
+                    Math.min(
+                        CANVAS_WIDTH - AVATAR_RADIUS,
+                        currentPosition.x + movement[0]
+                    )
                 );
 
-                newY = Math.max(
-                    20,
-                    Math.min(480, newY)
+                const y = Math.max(
+                    AVATAR_RADIUS,
+                    Math.min(
+                        CANVAS_HEIGHT - AVATAR_RADIUS,
+                        currentPosition.y + movement[1]
+                    )
                 );
 
-                socket.emit("avatar:move", {
-                    x: newX,
-                    y: newY
-                });
+                socket.emit("avatar:move", { x, y });
 
-                return {
-                    x: newX,
-                    y: newY
-                };
+                return { x, y };
             });
         };
 
-        window.addEventListener(
-            "keydown",
-            handleKeyDown
-        );
+        window.addEventListener("keydown", handleKeyDown);
 
         return () => {
-            window.removeEventListener(
-                "keydown",
-                handleKeyDown
-            );
+            window.removeEventListener("keydown", handleKeyDown);
         };
     }, []);
 
-    // Toggle microphone
+    // Enable or disable the microphone.
     const toggleMicrophone = async () => {
-        try {
-            // Turn microphone ON
-            if (!isMicOn) {
-                const stream =
-                    await navigator.mediaDevices.getUserMedia(
-                        {
-                            audio: true,
-                            video: false
-                        }
-                    );
+        setErrorMessage("");
 
-                setLocalStream(stream);
+        if (!localStreamRef.current) {
+            try {
+                const stream =
+                    await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: false,
+                    });
+
+                localStreamRef.current = stream;
                 setIsMicOn(true);
 
-                console.log(
-                    "Microphone enabled"
-                );
-            }
+                console.log("Microphone enabled");
 
-            // Turn microphone OFF
-            else {
-                Object.values(
-                    peerConnections.current
-                ).forEach((peerConnection) => {
-                    peerConnection.close();
-                });
-
-                peerConnections.current = {};
-
-                if (localStream) {
-                    localStream
-                        .getTracks()
-                        .forEach((track) => {
-                            track.stop();
-                        });
+                // Create connections for users already nearby.
+                for (const user of nearbyUsers) {
+                    if (!peerConnections.current[user.userId]) {
+                        createPeerConnection(
+                            user.userId,
+                            stream,
+                            true
+                        );
+                    }
                 }
+            } catch (error) {
+                console.error("Microphone access failed:", error);
 
-                setLocalStream(null);
-                setIsMicOn(false);
-
-                console.log(
-                    "Microphone disabled"
+                setErrorMessage(
+                    "Could not access the microphone. Check browser permissions."
                 );
             }
-        } catch (error) {
-            console.error(
-                "Microphone access failed:",
-                error
-            );
+
+            return;
         }
+
+        // Close peer connections when the microphone is turned off.
+        Object.keys(peerConnections.current).forEach((userId) => {
+            cleanupPeerConnection(userId);
+        });
+
+        localStreamRef.current.getTracks().forEach((track) => {
+            track.stop();
+        });
+
+        localStreamRef.current = null;
+        setIsMicOn(false);
+
+        console.log("Microphone disabled");
     };
 
     return (
-        <div>
+        <div style={{ padding: "20px", fontFamily: "Arial, sans-serif" }}>
             <h1>ProxiSpeak</h1>
 
+            <p>Use the arrow keys to move your avatar.</p>
+
             <p>
-                Use the arrow keys to move
-                your avatar.
+                Nearby users: <strong>{nearbyUsers.length}</strong>
             </p>
 
             <p>
-                Nearby users:{" "}
-                <strong>
-                    {nearbyUsers.length}
-                </strong>
+                Microphone:{" "}
+                <strong>{isMicOn ? "On" : "Off"}</strong>
             </p>
+
+            {errorMessage && (
+                <p style={{ color: "red" }}>{errorMessage}</p>
+            )}
+
+            <button onClick={toggleMicrophone}>
+                {isMicOn
+                    ? "🎙️ Turn Microphone Off"
+                    : "🎤 Turn Microphone On"}
+            </button>
 
             {nearbyUsers.length > 0 && (
                 <div>
-                    <strong>
-                        Users within 100 pixels:
-                    </strong>
+                    <h3>Users within 100 pixels</h3>
 
                     <ul>
-                        {nearbyUsers.map(
-                            (user) => (
-                                <li
-                                    key={
-                                        user.userId
-                                    }
-                                >
-                                    {user.username}
-                                </li>
-                            )
-                        )}
+                        {nearbyUsers.map((user) => (
+                            <li key={user.userId}>
+                                {user.username}
+                            </li>
+                        ))}
                     </ul>
                 </div>
             )}
 
-            <button
-                onClick={toggleMicrophone}
-            >
-                {isMicOn
-                    ? "🎙️ Microphone On"
-                    : "🎤 Turn Microphone On"}
-            </button>
-
-            <br />
-            <br />
-
             <canvas
                 ref={canvasRef}
-                width={800}
-                height={500}
+                width={CANVAS_WIDTH}
+                height={CANVAS_HEIGHT}
                 style={{
-                    border: "1px solid black"
+                    border: "1px solid black",
+                    maxWidth: "100%",
+                    height: "auto",
+                    display: "block",
                 }}
             />
         </div>
