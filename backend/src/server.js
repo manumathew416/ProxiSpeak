@@ -1,12 +1,11 @@
-
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const dotenv = require("dotenv");
+
 const connectDB = require("./config/database");
 const User = require("./models/user");
-
 
 dotenv.config();
 
@@ -23,14 +22,54 @@ const io = new Server(server, {
     }
 });
 
-// Basic health check
+const PROXIMITY_RADIUS = 100;
+
 app.get("/api/health", (req, res) => {
     res.json({
         status: "ProxiSpeak backend is running"
     });
 });
 
-// Socket.io connection
+// Calculate distance between two users
+function calculateDistance(position1, position2) {
+    const dx = position1[0] - position2[0];
+    const dy = position1[1] - position2[1];
+
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Check whether two users are close enough
+async function areUsersNearby(socketId1, socketId2) {
+    const users = await User.find({
+        socketId: {
+            $in: [socketId1, socketId2]
+        }
+    }).select("socketId position");
+
+    if (users.length !== 2) {
+        return false;
+    }
+
+    const user1 = users.find(
+        (user) => user.socketId === socketId1
+    );
+
+    const user2 = users.find(
+        (user) => user.socketId === socketId2
+    );
+
+    if (!user1 || !user2) {
+        return false;
+    }
+
+    return (
+        calculateDistance(
+            user1.position,
+            user2.position
+        ) <= PROXIMITY_RADIUS
+    );
+}
+
 io.on("connection", async (socket) => {
     console.log(`User connected: ${socket.id}`);
 
@@ -43,6 +82,7 @@ io.on("connection", async (socket) => {
 
         console.log(`User saved: ${user.username}`);
 
+        // Handle avatar movement
         socket.on("avatar:move", async (data) => {
             try {
                 const { x, y } = data || {};
@@ -58,13 +98,12 @@ io.on("connection", async (socket) => {
                     return;
                 }
 
-                // Update the current user's position
                 await User.findOneAndUpdate(
                     { socketId: socket.id },
                     { position: [x, y] }
                 );
 
-                // Broadcast movement to other users
+                // Synchronize avatar movement
                 socket.broadcast.emit("avatar:moved", {
                     userId: socket.id,
                     username: user.username,
@@ -72,80 +111,182 @@ io.on("connection", async (socket) => {
                     y
                 });
 
-                // Find users within 100 pixels
+                // Find nearby users
                 const nearbyUsers = await User.find({
-                    socketId: { $ne: socket.id },
+                    socketId: {
+                        $ne: socket.id
+                    },
                     position: {
                         $near: [x, y],
-                        $maxDistance: 100
+                        $maxDistance: PROXIMITY_RADIUS
                     }
                 }).select("socketId username position");
 
-                // Send nearby users to the current user
                 socket.emit("proximity:update", {
-                    nearbyUsers: nearbyUsers.map((nearbyUser) => ({
-                        userId: nearbyUser.socketId,
-                        username: nearbyUser.username,
-                        x: nearbyUser.position[0],
-                        y: nearbyUser.position[1]
-                    }))
+                    nearbyUsers: nearbyUsers.map(
+                        (nearbyUser) => ({
+                            userId: nearbyUser.socketId,
+                            username: nearbyUser.username,
+                            x: nearbyUser.position[0],
+                            y: nearbyUser.position[1]
+                        })
+                    )
                 });
 
-                // Log proximity count for testing
                 console.log(
                     `${user.username}: ${nearbyUsers.length} nearby user(s)`
                 );
-
             } catch (error) {
-                console.error("Avatar movement error:", error.message);
+                console.error(
+                    "Avatar movement error:",
+                    error.message
+                );
             }
         });
 
-        // WebRTC offer
-socket.on("webrtc:offer", ({ targetUserId, offer }) => {
-    io.to(targetUserId).emit("webrtc:offer", {
-        senderUserId: socket.id,
-        offer
-    });
-});
+        // Validate proximity before relaying WebRTC offers
+        socket.on(
+            "webrtc:offer",
+            async ({ targetUserId, offer } = {}) => {
+                try {
+                    if (!targetUserId || !offer) {
+                        return;
+                    }
 
-// WebRTC answer
-socket.on("webrtc:answer", ({ targetUserId, answer }) => {
-    io.to(targetUserId).emit("webrtc:answer", {
-        senderUserId: socket.id,
-        answer
-    });
-});
+                    const nearby = await areUsersNearby(
+                        socket.id,
+                        targetUserId
+                    );
 
-// WebRTC ICE candidate
-socket.on("webrtc:ice-candidate", ({ targetUserId, candidate }) => {
-    io.to(targetUserId).emit("webrtc:ice-candidate", {
-        senderUserId: socket.id,
-        candidate
-    });
-});
+                    if (!nearby) {
+                        console.log(
+                            "Offer rejected: users are not nearby"
+                        );
+                        return;
+                    }
 
+                    io.to(targetUserId).emit(
+                        "webrtc:offer",
+                        {
+                            senderUserId: socket.id,
+                            offer
+                        }
+                    );
+                } catch (error) {
+                    console.error(
+                        "WebRTC offer error:",
+                        error.message
+                    );
+                }
+            }
+        );
+
+        // Validate proximity before relaying WebRTC answers
+        socket.on(
+            "webrtc:answer",
+            async ({ targetUserId, answer } = {}) => {
+                try {
+                    if (!targetUserId || !answer) {
+                        return;
+                    }
+
+                    const nearby = await areUsersNearby(
+                        socket.id,
+                        targetUserId
+                    );
+
+                    if (!nearby) {
+                        return;
+                    }
+
+                    io.to(targetUserId).emit(
+                        "webrtc:answer",
+                        {
+                            senderUserId: socket.id,
+                            answer
+                        }
+                    );
+                } catch (error) {
+                    console.error(
+                        "WebRTC answer error:",
+                        error.message
+                    );
+                }
+            }
+        );
+
+        // Validate proximity before relaying ICE candidates
+        socket.on(
+            "webrtc:ice-candidate",
+            async ({ targetUserId, candidate } = {}) => {
+                try {
+                    if (!targetUserId || !candidate) {
+                        return;
+                    }
+
+                    const nearby = await areUsersNearby(
+                        socket.id,
+                        targetUserId
+                    );
+
+                    if (!nearby) {
+                        return;
+                    }
+
+                    io.to(targetUserId).emit(
+                        "webrtc:ice-candidate",
+                        {
+                            senderUserId: socket.id,
+                            candidate
+                        }
+                    );
+                } catch (error) {
+                    console.error(
+                        "WebRTC ICE error:",
+                        error.message
+                    );
+                }
+            }
+        );
+
+        // Remove disconnected user from MongoDB
         socket.on("disconnect", async () => {
-            console.log(`User disconnected: ${socket.id}`);
+            console.log(
+                `User disconnected: ${socket.id}`
+            );
 
             try {
                 await User.findOneAndDelete({
                     socketId: socket.id
                 });
+
+                // Inform clients that this avatar disappeared
+                socket.broadcast.emit(
+                    "avatar:left",
+                    {
+                        userId: socket.id
+                    }
+                );
             } catch (error) {
-                console.error("User cleanup error:", error.message);
+                console.error(
+                    "User cleanup error:",
+                    error.message
+                );
             }
         });
-
     } catch (error) {
-        console.error("Socket user error:", error.message);
+        console.error(
+            "Socket user error:",
+            error.message
+        );
+
         socket.disconnect(true);
     }
 });
 
 const PORT = process.env.PORT || 5000;
 
-const startServer = async () => {
+async function startServer() {
     try {
         await connectDB();
 
@@ -155,8 +296,11 @@ const startServer = async () => {
             );
         });
     } catch (error) {
-        console.error("Failed to start server:", error.message);
+        console.error(
+            "Failed to start server:",
+            error.message
+        );
     }
-};
+}
 
 startServer();
