@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import { updateSpatialVolume } from "./utils/spatialAudio";
 
 const socket = io("http://localhost:5000");
 
@@ -452,6 +453,25 @@ function App() {
             window.removeEventListener("keydown", handleKeyDown);
         };
     }, []);
+
+    useEffect(() => {
+    Object.entries(remoteAudioRefs.current).forEach(
+        ([userId, audioElement]) => {
+            const remoteUser = otherUsers[userId];
+
+            if (!remoteUser) {
+                audioElement.volume = 0;
+                return;
+            }
+
+            updateSpatialVolume(
+                audioElement,
+                position,
+                remoteUser
+            );
+        }
+    );
+}, [position, otherUsers]);
 
     // Enable or disable the microphone.
     const toggleMicrophone = async () => {
