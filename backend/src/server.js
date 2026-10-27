@@ -1,3 +1,4 @@
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -12,21 +13,25 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors());
-app.use(express.json());
-
 const io = new Server(server, {
     cors: {
         origin: "http://localhost:5173",
-        methods: ["GET", "POST"]
-    }
+        methods: ["GET", "POST"],
+    },
 });
 
+const PORT = process.env.PORT || 5000;
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 500;
 const PROXIMITY_RADIUS = 100;
 
+app.use(cors({ origin: "http://localhost:5173" }));
+app.use(express.json());
+
+// Health check
 app.get("/api/health", (req, res) => {
     res.json({
-        status: "ProxiSpeak backend is running"
+        status: "ProxiSpeak backend is running",
     });
 });
 
@@ -38,268 +43,241 @@ function calculateDistance(position1, position2) {
     return Math.sqrt(dx * dx + dy * dy);
 }
 
-// Check whether two users are close enough
+// Check whether two connected users are within earshot
 async function areUsersNearby(socketId1, socketId2) {
     const users = await User.find({
-        socketId: {
-            $in: [socketId1, socketId2]
-        }
-    }).select("socketId position");
+        socketId: { $in: [socketId1, socketId2] },
+    });
 
     if (users.length !== 2) {
         return false;
     }
 
-    const user1 = users.find(
-        (user) => user.socketId === socketId1
-    );
-
-    const user2 = users.find(
-        (user) => user.socketId === socketId2
-    );
-
-    if (!user1 || !user2) {
-        return false;
-    }
-
     return (
-        calculateDistance(
-            user1.position,
-            user2.position
-        ) <= PROXIMITY_RADIUS
+        calculateDistance(users[0].position, users[1].position) <
+        PROXIMITY_RADIUS
     );
 }
 
+// Send an updated nearby-user list to every connected client
+async function broadcastProximityUpdates() {
+    const users = await User.find(
+        {},
+        { socketId: 1, username: 1, position: 1 }
+    );
+
+    for (const currentUser of users) {
+        const nearbyUsers = users
+            .filter((otherUser) => {
+                if (otherUser.socketId === currentUser.socketId) {
+                    return false;
+                }
+
+                return (
+                    calculateDistance(
+                        currentUser.position,
+                        otherUser.position
+                    ) < PROXIMITY_RADIUS
+                );
+            })
+            .map((otherUser) => ({
+                userId: otherUser.socketId,
+                username: otherUser.username,
+                x: otherUser.position[0],
+                y: otherUser.position[1],
+            }));
+
+        io.to(currentUser.socketId).emit(
+            "proximity:update",
+            nearbyUsers
+        );
+    }
+}
+
+// WebRTC signaling relay with proximity validation
+async function relayWebRTCEvent(
+    socket,
+    eventName,
+    payload,
+    dataKey
+) {
+    try {
+        const { targetUserId } = payload || {};
+        const data = payload?.[dataKey];
+
+        if (
+            typeof targetUserId !== "string" ||
+            !targetUserId ||
+            !data
+        ) {
+            return;
+        }
+
+        const nearby = await areUsersNearby(
+            socket.id,
+            targetUserId
+        );
+
+        if (!nearby) {
+            socket.emit("webrtc:error", {
+                message: "User is outside the audio range.",
+            });
+            return;
+        }
+
+        io.to(targetUserId).emit(eventName, {
+            senderUserId: socket.id,
+            [dataKey]: data,
+        });
+    } catch (error) {
+        console.error(`${eventName} error:`, error.message);
+    }
+}
+
+// Socket.io connections
 io.on("connection", async (socket) => {
-    console.log(`User connected: ${socket.id}`);
+    console.log("User connected:", socket.id);
 
     try {
         const user = await User.create({
             socketId: socket.id,
             username: `User-${socket.id.slice(0, 5)}`,
-            position: [400, 250]
+            position: [400, 250],
         });
 
-        console.log(`User saved: ${user.username}`);
+        console.log("User saved:", user.username);
 
-        // Handle avatar movement
-        socket.on("avatar:move", async (data) => {
-            try {
-                const { x, y } = data || {};
-
-                if (
-                    typeof x !== "number" ||
-                    typeof y !== "number" ||
-                    !Number.isFinite(x) ||
-                    !Number.isFinite(y) ||
-                    x < 0 || x > 800 ||
-                    y < 0 || y > 500
-                ) {
-                    return;
-                }
-
-                await User.findOneAndUpdate(
-                    { socketId: socket.id },
-                    { position: [x, y] }
-                );
-
-                // Synchronize avatar movement
-                socket.broadcast.emit("avatar:moved", {
-                    userId: socket.id,
-                    username: user.username,
-                    x,
-                    y
-                });
-
-                // Find nearby users
-                const nearbyUsers = await User.find({
-                    socketId: {
-                        $ne: socket.id
-                    },
-                    position: {
-                        $near: [x, y],
-                        $maxDistance: PROXIMITY_RADIUS
-                    }
-                }).select("socketId username position");
-
-                socket.emit("proximity:update", {
-                    nearbyUsers: nearbyUsers.map(
-                        (nearbyUser) => ({
-                            userId: nearbyUser.socketId,
-                            username: nearbyUser.username,
-                            x: nearbyUser.position[0],
-                            y: nearbyUser.position[1]
-                        })
-                    )
-                });
-
-                console.log(
-                    `${user.username}: ${nearbyUsers.length} nearby user(s)`
-                );
-            } catch (error) {
-                console.error(
-                    "Avatar movement error:",
-                    error.message
-                );
-            }
+        // Send initial position to the newly connected client
+        const existingUsers = await User.find({
+            socketId: { $ne: socket.id },
         });
 
-        // Validate proximity before relaying WebRTC offers
-        socket.on(
-            "webrtc:offer",
-            async ({ targetUserId, offer } = {}) => {
-                try {
-                    if (!targetUserId || !offer) {
-                        return;
-                    }
+        existingUsers.forEach((existingUser) => {
+            socket.emit("avatar:moved", {
+                userId: existingUser.socketId,
+                username: existingUser.username,
+                x: existingUser.position[0],
+                y: existingUser.position[1],
+            });
+        });
 
-                    const nearby = await areUsersNearby(
-                        socket.id,
-                        targetUserId
-                    );
+        // Notify other clients about the new user
+        socket.broadcast.emit("avatar:moved", {
+            userId: socket.id,
+            username: user.username,
+            x: user.position[0],
+            y: user.position[1],
+        });
 
-                    if (!nearby) {
-                        console.log(
-                            "Offer rejected: users are not nearby"
-                        );
-                        return;
-                    }
+        await broadcastProximityUpdates();
+    } catch (error) {
+        console.error("User initialization error:", error.message);
+        socket.disconnect(true);
+        return;
+    }
 
-                    io.to(targetUserId).emit(
-                        "webrtc:offer",
-                        {
-                            senderUserId: socket.id,
-                            offer
-                        }
-                    );
-                } catch (error) {
-                    console.error(
-                        "WebRTC offer error:",
-                        error.message
-                    );
-                }
+    // Handle avatar movement
+    socket.on("avatar:move", async ({ x, y } = {}) => {
+        try {
+            if (
+                !Number.isFinite(x) ||
+                !Number.isFinite(y) ||
+                x < 0 ||
+                x > CANVAS_WIDTH ||
+                y < 0 ||
+                y > CANVAS_HEIGHT
+            ) {
+                return;
             }
-        );
 
-        // Validate proximity before relaying WebRTC answers
-        socket.on(
-            "webrtc:answer",
-            async ({ targetUserId, answer } = {}) => {
-                try {
-                    if (!targetUserId || !answer) {
-                        return;
-                    }
-
-                    const nearby = await areUsersNearby(
-                        socket.id,
-                        targetUserId
-                    );
-
-                    if (!nearby) {
-                        return;
-                    }
-
-                    io.to(targetUserId).emit(
-                        "webrtc:answer",
-                        {
-                            senderUserId: socket.id,
-                            answer
-                        }
-                    );
-                } catch (error) {
-                    console.error(
-                        "WebRTC answer error:",
-                        error.message
-                    );
-                }
-            }
-        );
-
-        // Validate proximity before relaying ICE candidates
-        socket.on(
-            "webrtc:ice-candidate",
-            async ({ targetUserId, candidate } = {}) => {
-                try {
-                    if (!targetUserId || !candidate) {
-                        return;
-                    }
-
-                    const nearby = await areUsersNearby(
-                        socket.id,
-                        targetUserId
-                    );
-
-                    if (!nearby) {
-                        return;
-                    }
-
-                    io.to(targetUserId).emit(
-                        "webrtc:ice-candidate",
-                        {
-                            senderUserId: socket.id,
-                            candidate
-                        }
-                    );
-                } catch (error) {
-                    console.error(
-                        "WebRTC ICE error:",
-                        error.message
-                    );
-                }
-            }
-        );
-
-        // Remove disconnected user from MongoDB
-        socket.on("disconnect", async () => {
-            console.log(
-                `User disconnected: ${socket.id}`
+            const user = await User.findOneAndUpdate(
+                { socketId: socket.id },
+                { $set: { position: [x, y] } },
+                { new: true }
             );
 
-            try {
-                await User.findOneAndDelete({
-                    socketId: socket.id
+            if (!user) {
+                return;
+            }
+
+            // Synchronize avatar position
+            socket.broadcast.emit("avatar:moved", {
+                userId: socket.id,
+                username: user.username,
+                x,
+                y,
+            });
+
+            // Refresh nearby lists for all users
+            await broadcastProximityUpdates();
+        } catch (error) {
+            console.error("Avatar movement error:", error.message);
+        }
+    });
+
+    // WebRTC offer
+    socket.on("webrtc:offer", async (payload) => {
+        await relayWebRTCEvent(
+            socket,
+            "webrtc:offer",
+            payload,
+            "offer"
+        );
+    });
+
+    // WebRTC answer
+    socket.on("webrtc:answer", async (payload) => {
+        await relayWebRTCEvent(
+            socket,
+            "webrtc:answer",
+            payload,
+            "answer"
+        );
+    });
+
+    // WebRTC ICE candidate
+    socket.on("webrtc:ice-candidate", async (payload) => {
+        await relayWebRTCEvent(
+            socket,
+            "webrtc:ice-candidate",
+            payload,
+            "candidate"
+        );
+    });
+
+    // Handle disconnection
+    socket.on("disconnect", async () => {
+        try {
+            const user = await User.findOneAndDelete({
+                socketId: socket.id,
+            });
+
+            if (user) {
+                console.log("User disconnected:", user.username);
+
+                socket.broadcast.emit("avatar:left", {
+                    userId: socket.id,
                 });
 
-                // Inform clients that this avatar disappeared
-                socket.broadcast.emit(
-                    "avatar:left",
-                    {
-                        userId: socket.id
-                    }
-                );
-            } catch (error) {
-                console.error(
-                    "User cleanup error:",
-                    error.message
-                );
+                await broadcastProximityUpdates();
             }
-        });
-    } catch (error) {
-        console.error(
-            "Socket user error:",
-            error.message
-        );
-
-        socket.disconnect(true);
-    }
+        } catch (error) {
+            console.error("Disconnect cleanup error:", error.message);
+        }
+    });
 });
 
-const PORT = process.env.PORT || 5000;
-
+// Start server after MongoDB connects
 async function startServer() {
     try {
         await connectDB();
 
         server.listen(PORT, () => {
-            console.log(
-                `ProxiSpeak server running on http://localhost:${PORT}`
-            );
+            console.log(`ProxiSpeak server running on port ${PORT}`);
         });
     } catch (error) {
-        console.error(
-            "Failed to start server:",
-            error.message
-        );
+        console.error("Server startup failed:", error.message);
+        process.exit(1);
     }
 }
 
