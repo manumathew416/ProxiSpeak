@@ -297,13 +297,17 @@ function App() {
                 }
             });
 
-            if (localStreamRef.current) {
-                users.forEach((user) => {
-                    if (!peerConnections.current[user.userId]) {
-                        makeOffer(user.userId);
-                    }
-                });
-            }
+           if (localStreamRef.current) {
+            users.forEach((user) => {
+                if (
+                    socket.id &&
+                    socket.id.localeCompare(user.userId) < 0 &&
+                    !peerConnections.current[user.userId]
+        ) {
+            makeOffer(user.userId);
+        }
+    });
+}
         };
 
         socket.on("proximity:update", handleProximityUpdate);
@@ -507,8 +511,14 @@ function App() {
                 setIsMicOn(true);
 
                 nearbyUsers.forEach((user) => {
-                    makeOffer(user.userId);
-                });
+    if (
+        socket.id &&
+        socket.id.localeCompare(user.userId) < 0 &&
+        !peerConnections.current[user.userId]
+    ) {
+        makeOffer(user.userId);
+    }
+});
             } catch (error) {
                 console.error("Microphone access failed:", error);
                 setErrorMessage(
