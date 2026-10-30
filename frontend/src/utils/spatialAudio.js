@@ -1,8 +1,6 @@
-const MAX_AUDIBLE_DISTANCE = 100;
-const MIN_VOLUME = 0;
-const MAX_VOLUME = 1;
 
-// Calculate distance between two avatars.
+const MAX_AUDIBLE_DISTANCE = 100;
+
 export function calculateDistance(user1, user2) {
     const dx = user1.x - user2.x;
     const dy = user1.y - user2.y;
@@ -10,35 +8,37 @@ export function calculateDistance(user1, user2) {
     return Math.sqrt(dx * dx + dy * dy);
 }
 
-// Calculate audio volume based on distance.
 export function calculateVolume(distance) {
-    if (distance >= MAX_AUDIBLE_DISTANCE) {
-        return MIN_VOLUME;
-    }
+    if (distance >= MAX_AUDIBLE_DISTANCE) return 0;
+    if (distance <= 0) return 1;
 
-    if (distance <= 0) {
-        return MAX_VOLUME;
-    }
-
-    // Linear attenuation: closer means louder.
-    return Math.max(
-        MIN_VOLUME,
-        Math.min(
-            MAX_VOLUME,
-            1 - distance / MAX_AUDIBLE_DISTANCE
-        )
-    );
+    return 1 - distance / MAX_AUDIBLE_DISTANCE;
 }
 
-// Apply volume to a remote audio element.
-export function updateSpatialVolume(
-    audioElement,
+export function createSpatialAudio(audioElement) {
+    const audioContext = new AudioContext();
+
+    const source = audioContext.createMediaElementSource(audioElement);
+    const gainNode = audioContext.createGain();
+    const pannerNode = audioContext.createStereoPanner();
+
+    source.connect(gainNode);
+    gainNode.connect(pannerNode);
+    pannerNode.connect(audioContext.destination);
+
+    return {
+        audioContext,
+        gainNode,
+        pannerNode,
+    };
+}
+
+export function updateSpatialAudio(
+    spatialAudio,
     localPosition,
     remotePosition
 ) {
-    if (!audioElement) {
-        return 0;
-    }
+    if (!spatialAudio) return;
 
     const distance = calculateDistance(
         localPosition,
@@ -47,7 +47,24 @@ export function updateSpatialVolume(
 
     const volume = calculateVolume(distance);
 
-    audioElement.volume = volume;
+    // Left and right direction
+    const horizontalDifference =
+        remotePosition.x - localPosition.x;
 
-    return volume;
+    const pan = Math.max(
+        -1,
+        Math.min(1, horizontalDifference / MAX_AUDIBLE_DISTANCE)
+    );
+
+    spatialAudio.gainNode.gain.setTargetAtTime(
+        volume,
+        spatialAudio.audioContext.currentTime,
+        0.05
+    );
+
+    spatialAudio.pannerNode.pan.setTargetAtTime(
+        pan,
+        spatialAudio.audioContext.currentTime,
+        0.05
+    );
 }
