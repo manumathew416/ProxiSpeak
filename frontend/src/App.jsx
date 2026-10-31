@@ -12,9 +12,14 @@ const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 500;
 const AVATAR_SIZE = 20;
 const MOVE_SPEED = 5;
+const MOVEMENT_SMOOTHNESS = 0.08;
+const MOVE_EMIT_INTERVAL = 50;
 
 function App() {
     const canvasRef = useRef(null);
+
+    const positionRef = useRef({ x: 400, y: 250 });
+    const targetPosition = useRef({ x: 400, y: 250 });
 
     const peerConnections = useRef({});
     const remoteAudioRefs = useRef({});
@@ -22,6 +27,7 @@ function App() {
     const localStreamRef = useRef(null);
     const pendingCandidates = useRef({});
     const makingOffer = useRef({});
+    const lastMoveEmit = useRef(0);
 
     const [position, setPosition] = useState({
         x: 400,
@@ -34,6 +40,25 @@ function App() {
     const [errorMessage, setErrorMessage] = useState("");
     const [isConnected, setIsConnected] = useState(false);
 
+    // Update local position and movement target
+    const moveTo = useCallback((x, y) => {
+        const newPosition = {
+            x: Math.max(
+                AVATAR_SIZE,
+                Math.min(CANVAS_WIDTH - AVATAR_SIZE, x)
+            ),
+            y: Math.max(
+                AVATAR_SIZE,
+                Math.min(CANVAS_HEIGHT - AVATAR_SIZE, y)
+            )
+        };
+
+        targetPosition.current = newPosition;
+
+        return newPosition;
+    }, []);
+
+    // Clean up a peer connection
     const cleanupPeerConnection = useCallback((userId) => {
         const pc = peerConnections.current[userId];
 
@@ -61,6 +86,7 @@ function App() {
         delete makingOffer.current[userId];
     }, []);
 
+    // Create WebRTC peer connection
     const createPeerConnection = useCallback((userId) => {
         if (peerConnections.current[userId]) {
             return peerConnections.current[userId];
@@ -99,14 +125,17 @@ function App() {
                 remoteAudioRefs.current[userId] = audio;
 
                 const spatialAudio = createSpatialAudio(audio);
-
                 spatialAudioRefs.current[userId] = spatialAudio;
+
+                if (spatialAudio.audioContext.state === "suspended") {
+                    spatialAudio.audioContext.resume().catch(console.error);
+                }
             }
 
             audio.srcObject = event.streams[0];
 
             audio.play().catch((error) => {
-                console.log("Audio playback requires user interaction:", error);
+                console.log("Audio playback requires interaction:", error);
             });
         };
 
@@ -129,6 +158,7 @@ function App() {
         return pc;
     }, [cleanupPeerConnection]);
 
+    // Create and send WebRTC offer
     const makeOffer = useCallback(async (userId) => {
         if (makingOffer.current[userId]) return;
 
@@ -136,7 +166,6 @@ function App() {
             makingOffer.current[userId] = true;
 
             const pc = createPeerConnection(userId);
-
             const offer = await pc.createOffer();
 
             await pc.setLocalDescription(offer);
@@ -145,6 +174,7 @@ function App() {
                 targetUserId: userId,
                 offer: pc.localDescription
             });
+
         } catch (error) {
             console.error("Error creating offer:", error);
             cleanupPeerConnection(userId);
@@ -190,20 +220,14 @@ function App() {
         ctx.fillStyle = "#f5f5f5";
         ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-        // Draw nearby users
+        // Other users
         otherUsers.forEach((user) => {
             const isNearby = nearbyUsers.some(
                 (nearbyUser) => nearbyUser.userId === user.userId
             );
 
             ctx.beginPath();
-            ctx.arc(
-                user.x,
-                user.y,
-                AVATAR_SIZE,
-                0,
-                Math.PI * 2
-            );
+            ctx.arc(user.x, user.y, AVATAR_SIZE, 0, Math.PI * 2);
 
             ctx.fillStyle = isNearby ? "#22c55e" : "#ef4444";
             ctx.fill();
@@ -211,14 +235,10 @@ function App() {
             ctx.fillStyle = "#111";
             ctx.font = "12px Arial";
             ctx.textAlign = "center";
-            ctx.fillText(
-                user.username,
-                user.x,
-                user.y + 32
-            );
+            ctx.fillText(user.username, user.x, user.y + 32);
         });
 
-        // Draw local avatar
+        // Local user
         ctx.beginPath();
         ctx.arc(
             position.x,
@@ -242,15 +262,13 @@ function App() {
     useEffect(() => {
         const handleAvatarMoved = (user) => {
             setOtherUsers((previousUsers) => {
-                const existingUser = previousUsers.find(
+                const exists = previousUsers.some(
                     (item) => item.userId === user.userId
                 );
 
-                if (existingUser) {
+                if (exists) {
                     return previousUsers.map((item) =>
-                        item.userId === user.userId
-                            ? user
-                            : item
+                        item.userId === user.userId ? user : item
                     );
                 }
 
@@ -277,7 +295,7 @@ function App() {
         };
     }, [cleanupPeerConnection]);
 
-    // Handle proximity updates
+    // Handle nearby users
     useEffect(() => {
         const handleProximityUpdate = (users) => {
             setNearbyUsers(users);
@@ -293,7 +311,6 @@ function App() {
             if (!localStreamRef.current) return;
 
             users.forEach((user) => {
-                // Only one side initiates the connection
                 if (
                     socket.id &&
                     socket.id.localeCompare(user.userId) < 0 &&
@@ -313,10 +330,7 @@ function App() {
 
     // Receive WebRTC offer
     useEffect(() => {
-        const handleOffer = async ({
-            senderUserId,
-            offer
-        }) => {
+        const handleOffer = async ({ senderUserId, offer }) => {
             const isNearby = nearbyUsers.some(
                 (user) => user.userId === senderUserId
             );
@@ -365,10 +379,7 @@ function App() {
 
     // Receive WebRTC answer
     useEffect(() => {
-        const handleAnswer = async ({
-            senderUserId,
-            answer
-        }) => {
+        const handleAnswer = async ({ senderUserId, answer }) => {
             try {
                 const pc = peerConnections.current[senderUserId];
 
@@ -435,10 +446,11 @@ function App() {
         };
     }, []);
 
-    // WebRTC server errors
+    // Receive WebRTC errors
     useEffect(() => {
         const handleError = (message) => {
             console.error("WebRTC error:", message);
+
             setErrorMessage(
                 typeof message === "string"
                     ? message
@@ -453,7 +465,7 @@ function App() {
         };
     }, []);
 
-    // Update spatial audio when avatars move
+    // Update spatial audio
     useEffect(() => {
         nearbyUsers.forEach((user) => {
             const spatialAudio = spatialAudioRefs.current[user.userId];
@@ -462,52 +474,92 @@ function App() {
                 updateSpatialAudio(
                     spatialAudio,
                     position,
-                    {
-                        x: user.x,
-                        y: user.y
-                    }
+                    { x: user.x, y: user.y }
                 );
             }
         });
     }, [position, nearbyUsers]);
 
+    // Smooth movement animation
+    useEffect(() => {
+        let animationId;
+        let lastFrameTime = 0;
+
+        const animate = (timestamp) => {
+            const current = positionRef.current;
+            const target = targetPosition.current;
+
+            const dx = target.x - current.x;
+            const dy = target.y - current.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance > 0.5) {
+                const newPosition = {
+                    x: current.x + dx * MOVEMENT_SMOOTHNESS,
+                    y: current.y + dy * MOVEMENT_SMOOTHNESS
+                };
+
+                positionRef.current = newPosition;
+                setPosition(newPosition);
+
+                if (
+                    timestamp - lastFrameTime >= MOVE_EMIT_INTERVAL
+                ) {
+                    socket.emit("avatar:move", newPosition);
+                    lastFrameTime = timestamp;
+                }
+            } else if (distance > 0) {
+                positionRef.current = target;
+                setPosition(target);
+                socket.emit("avatar:move", target);
+            }
+
+            animationId = requestAnimationFrame(animate);
+        };
+
+        animationId = requestAnimationFrame(animate);
+
+        return () => cancelAnimationFrame(animationId);
+    }, []);
+
+    // Mouse click movement
+    const handleCanvasClick = (event) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const rect = canvas.getBoundingClientRect();
+
+        const scaleX = CANVAS_WIDTH / rect.width;
+        const scaleY = CANVAS_HEIGHT / rect.height;
+
+        const x = (event.clientX - rect.left) * scaleX;
+        const y = (event.clientY - rect.top) * scaleY;
+
+        moveTo(x, y);
+    };
+
     // Keyboard movement
     useEffect(() => {
         const handleKeyDown = (event) => {
-            const keys = [
-                "ArrowUp",
-                "ArrowDown",
-                "ArrowLeft",
-                "ArrowRight"
-            ];
+            const directions = {
+                ArrowUp: [0, -MOVE_SPEED],
+                ArrowDown: [0, MOVE_SPEED],
+                ArrowLeft: [-MOVE_SPEED, 0],
+                ArrowRight: [MOVE_SPEED, 0]
+            };
 
-            if (!keys.includes(event.key)) return;
+            const direction = directions[event.key];
+
+            if (!direction) return;
 
             event.preventDefault();
 
-            setPosition((previousPosition) => {
-                let x = previousPosition.x;
-                let y = previousPosition.y;
+            const current = targetPosition.current;
 
-                if (event.key === "ArrowUp") y -= MOVE_SPEED;
-                if (event.key === "ArrowDown") y += MOVE_SPEED;
-                if (event.key === "ArrowLeft") x -= MOVE_SPEED;
-                if (event.key === "ArrowRight") x += MOVE_SPEED;
-
-                x = Math.max(
-                    AVATAR_SIZE,
-                    Math.min(CANVAS_WIDTH - AVATAR_SIZE, x)
-                );
-
-                y = Math.max(
-                    AVATAR_SIZE,
-                    Math.min(CANVAS_HEIGHT - AVATAR_SIZE, y)
-                );
-
-                socket.emit("avatar:move", { x, y });
-
-                return { x, y };
-            });
+            moveTo(
+                current.x + direction[0],
+                current.y + direction[1]
+            );
         };
 
         window.addEventListener("keydown", handleKeyDown);
@@ -515,7 +567,7 @@ function App() {
         return () => {
             window.removeEventListener("keydown", handleKeyDown);
         };
-    }, []);
+    }, [moveTo]);
 
     // Microphone toggle
     const toggleMicrophone = async () => {
@@ -530,7 +582,6 @@ function App() {
 
                 localStreamRef.current = stream;
 
-                // Resume audio contexts after user interaction
                 Object.values(spatialAudioRefs.current).forEach(
                     (spatialAudio) => {
                         if (
@@ -602,15 +653,19 @@ function App() {
 
             <p>
                 Server status:{" "}
-                <strong style={{
-                    color: isConnected ? "green" : "red"
-                }}>
+                <strong
+                    style={{
+                        color: isConnected ? "green" : "red"
+                    }}
+                >
                     {isConnected ? "Connected" : "Disconnected"}
                 </strong>
             </p>
 
             <button onClick={toggleMicrophone}>
-                {isMicOn ? "Turn Microphone Off" : "Turn Microphone On"}
+                {isMicOn
+                    ? "Turn Microphone Off"
+                    : "Turn Microphone On"}
             </button>
 
             {errorMessage && (
@@ -619,9 +674,7 @@ function App() {
                 </p>
             )}
 
-            <p>
-                Nearby users: {nearbyUsers.length}
-            </p>
+            <p>Nearby users: {nearbyUsers.length}</p>
 
             <div>
                 {nearbyUsers.map((user) => (
@@ -631,16 +684,20 @@ function App() {
                 ))}
             </div>
 
-            <p>Use arrow keys to move your avatar.</p>
+            <p>
+                Use arrow keys or click anywhere on the canvas to move.
+            </p>
 
             <canvas
                 ref={canvasRef}
                 width={CANVAS_WIDTH}
                 height={CANVAS_HEIGHT}
+                onClick={handleCanvasClick}
                 style={{
                     border: "2px solid black",
                     background: "#f5f5f5",
-                    maxWidth: "100%"
+                    maxWidth: "100%",
+                    cursor: "pointer"
                 }}
             />
         </div>
