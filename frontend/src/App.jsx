@@ -15,6 +15,127 @@ const MOVE_SPEED = 5;
 const MOVEMENT_SMOOTHNESS = 0.08;
 const MOVE_EMIT_INTERVAL = 50;
 
+
+function drawOffice(ctx) {
+    // Office floor
+    ctx.fillStyle = "#eef2f3";
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    // Main office area
+    ctx.fillStyle = "#e8f0e8";
+    ctx.fillRect(10, 10, 780, 480);
+
+    // Meeting room
+    ctx.fillStyle = "#dbeafe";
+    ctx.fillRect(520, 20, 260, 160);
+
+    ctx.strokeStyle = "#64748b";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(520, 20, 260, 160);
+
+    ctx.fillStyle = "#1e293b";
+    ctx.font = "bold 16px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("MEETING ROOM", 650, 45);
+
+    // Meeting table
+    ctx.fillStyle = "#a16207";
+    ctx.fillRect(590, 75, 120, 55);
+
+    // Meeting chairs
+    const chairs = [
+        [570, 85],
+        [570, 115],
+        [725, 85],
+        [725, 115],
+        [625, 60],
+        [675, 145]
+    ];
+
+    chairs.forEach(([x, y]) => {
+        ctx.fillStyle = "#475569";
+        ctx.fillRect(x, y, 15, 15);
+    });
+
+    // Workstation area
+    ctx.fillStyle = "#fef3c7";
+    ctx.fillRect(20, 20, 470, 460);
+
+    ctx.strokeStyle = "#d6a94b";
+    ctx.strokeRect(20, 20, 470, 460);
+
+    ctx.fillStyle = "#713f12";
+    ctx.font = "bold 16px Arial";
+    ctx.fillText("WORKSTATIONS", 250, 45);
+
+    // Draw desks
+    const desks = [
+        [80, 100],
+        [220, 100],
+        [360, 100],
+        [80, 260],
+        [220, 260],
+        [360, 260]
+    ];
+
+    desks.forEach(([x, y], index) => {
+        // Desk
+        ctx.fillStyle = "#a16207";
+        ctx.fillRect(x, y, 90, 45);
+
+        // Monitor
+        ctx.fillStyle = "#334155";
+        ctx.fillRect(x + 30, y + 7, 30, 20);
+
+        // Monitor screen
+        ctx.fillStyle = "#7dd3fc";
+        ctx.fillRect(x + 33, y + 10, 24, 14);
+
+        // Keyboard
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillRect(x + 28, y + 32, 35, 5);
+
+        // Chair
+        ctx.fillStyle = "#475569";
+        ctx.fillRect(x + 35, y + 55, 20, 20);
+
+        ctx.fillStyle = "#713f12";
+        ctx.font = "11px Arial";
+        ctx.fillText(`Desk ${index + 1}`, x + 45, y - 8);
+    });
+
+    // Plants
+    const plants = [
+        [35, 430],
+        [460, 430],
+        [755, 450]
+    ];
+
+    plants.forEach(([x, y]) => {
+        ctx.fillStyle = "#854d0e";
+        ctx.fillRect(x - 8, y + 8, 16, 12);
+
+        ctx.fillStyle = "#16a34a";
+        ctx.beginPath();
+        ctx.arc(x, y, 12, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    // Reception area
+    ctx.fillStyle = "#cbd5e1";
+    ctx.fillRect(550, 240, 210, 65);
+
+    ctx.fillStyle = "#334155";
+    ctx.font = "bold 14px Arial";
+    ctx.fillText("RECEPTION", 655, 278);
+
+    // Office entrance
+    ctx.fillStyle = "#64748b";
+    ctx.font = "bold 13px Arial";
+    ctx.fillText("ENTRANCE", 650, 460);
+}
+
+
 function App() {
     const canvasRef = useRef(null);
 
@@ -217,8 +338,7 @@ function App() {
 
         ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-        ctx.fillStyle = "#f5f5f5";
-        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        drawOffice(ctx);
 
         // Other users
         otherUsers.forEach((user) => {
