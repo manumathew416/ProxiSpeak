@@ -378,42 +378,64 @@ function App() {
 
     }, [position, otherUsers, nearbyUsers]);
 
-    // Receive avatar movement
-    useEffect(() => {
-        const handleAvatarMoved = (user) => {
-            setOtherUsers((previousUsers) => {
-                const exists = previousUsers.some(
-                    (item) => item.userId === user.userId
-                );
+    
+// Receive and synchronize users
+useEffect(() => {
+    const handleInitialUsers = (users) => {
+        setOtherUsers(users);
+    };
 
-                if (exists) {
-                    return previousUsers.map((item) =>
-                        item.userId === user.userId ? user : item
-                    );
-                }
-
-                return [...previousUsers, user];
-            });
-        };
-
-        const handleAvatarLeft = ({ userId }) => {
-            setOtherUsers((previousUsers) =>
-                previousUsers.filter(
-                    (user) => user.userId !== userId
-                )
+    const handleAvatarJoined = (user) => {
+        setOtherUsers((previousUsers) => {
+            const exists = previousUsers.some(
+                (item) => item.userId === user.userId
             );
 
-            cleanupPeerConnection(userId);
-        };
+            if (exists) return previousUsers;
 
-        socket.on("avatar:moved", handleAvatarMoved);
-        socket.on("avatar:left", handleAvatarLeft);
+            return [...previousUsers, user];
+        });
+    };
 
-        return () => {
-            socket.off("avatar:moved", handleAvatarMoved);
-            socket.off("avatar:left", handleAvatarLeft);
-        };
-    }, [cleanupPeerConnection]);
+    const handleAvatarMoved = (user) => {
+        setOtherUsers((previousUsers) => {
+            const exists = previousUsers.some(
+                (item) => item.userId === user.userId
+            );
+
+            if (exists) {
+                return previousUsers.map((item) =>
+                    item.userId === user.userId ? user : item
+                );
+            }
+
+            return [...previousUsers, user];
+        });
+    };
+
+    const handleAvatarLeft = ({ userId }) => {
+        setOtherUsers((previousUsers) =>
+            previousUsers.filter(
+                (user) => user.userId !== userId
+            )
+        );
+
+        cleanupPeerConnection(userId);
+    };
+
+    socket.on("users:initial", handleInitialUsers);
+    socket.on("avatar:joined", handleAvatarJoined);
+    socket.on("avatar:moved", handleAvatarMoved);
+    socket.on("avatar:left", handleAvatarLeft);
+
+    return () => {
+        socket.off("users:initial", handleInitialUsers);
+        socket.off("avatar:joined", handleAvatarJoined);
+        socket.off("avatar:moved", handleAvatarMoved);
+        socket.off("avatar:left", handleAvatarLeft);
+    };
+}, [cleanupPeerConnection]);
+
 
     // Handle nearby users
     useEffect(() => {
