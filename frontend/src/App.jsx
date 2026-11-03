@@ -6,7 +6,9 @@ import {
     updateSpatialAudio
 } from "./utils/spatialAudio";
 
-const socket = io("http://localhost:5000");
+const socket = io("http://localhost:5000", {
+    autoConnect: false
+});
 
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 500;
@@ -382,21 +384,22 @@ function App() {
 // Receive and synchronize users
 useEffect(() => {
     const handleInitialUsers = (users) => {
+        console.log("INITIAL USERS RECEIVED:", users);
         setOtherUsers(users);
+    
     };
 
     const handleAvatarJoined = (user) => {
-        setOtherUsers((previousUsers) => {
-            const exists = previousUsers.some(
-                (item) => item.userId === user.userId
-            );
+    console.log("NEW USER JOINED:", user);
 
-            if (exists) return previousUsers;
+    setOtherUsers((previousUsers) => {
+        if (previousUsers.some((item) => item.userId === user.userId)) {
+            return previousUsers;
+        }
 
-            return [...previousUsers, user];
-        });
-    };
-
+        return [...previousUsers, user];
+    });
+};
     const handleAvatarMoved = (user) => {
         setOtherUsers((previousUsers) => {
             const exists = previousUsers.some(
@@ -774,20 +777,23 @@ useEffect(() => {
 
     // Cleanup on unmount
     useEffect(() => {
-        return () => {
-            Object.keys(peerConnections.current).forEach(
-                cleanupPeerConnection
+    // Connect only after all socket event listeners are registered.
+    socket.connect();
+
+    return () => {
+        Object.keys(peerConnections.current).forEach(
+            cleanupPeerConnection
+        );
+
+        if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(
+                (track) => track.stop()
             );
+        }
 
-            if (localStreamRef.current) {
-                localStreamRef.current.getTracks().forEach(
-                    (track) => track.stop()
-                );
-            }
-
-            socket.disconnect();
-        };
-    }, [cleanupPeerConnection]);
+        socket.disconnect();
+    };
+}, [cleanupPeerConnection]);
 
     return (
         <div style={{ padding: "20px", fontFamily: "Arial" }}>
