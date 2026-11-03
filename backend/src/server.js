@@ -3,242 +3,240 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
-const dotenv = require("dotenv");
+require("dotenv").config();
 
 const connectDB = require("./config/database");
 const User = require("./models/user");
 
-dotenv.config();
-
 const app = express();
 const server = http.createServer(app);
 
-const io = new Server(server, {
-    cors: {
-        origin: "http://localhost:5173",
-        methods: ["GET", "POST"],
-    },
-});
-
 const PORT = process.env.PORT || 5000;
+
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 500;
 const AVATAR_SIZE = 20;
 const PROXIMITY_RADIUS = 100;
 
-app.use(cors({ origin: "http://localhost:5173" }));
+app.use(cors());
 app.use(express.json());
 
-app.get("/api/health", (req, res) => {
-    res.json({ status: "ProxiSpeak backend is running" });
+const io = new Server(server, {
+    cors: {
+        origin: "http://localhost:5173",
+        methods: ["GET", "POST"]
+    }
 });
 
-function calculateDistance(position1, position2) {
-    const dx = position1[0] - position2[0];
-    const dy = position1[1] - position2[1];
+// Health check
+app.get("/api/health", (req, res) => {
+    res.json({ message: "ProxiSpeak backend is running" });
+});
+
+// Calculate distance between two users
+const calculateDistance = (user1, user2) => {
+    const dx = user1.position[0] - user2.position[0];
+    const dy = user1.position[1] - user2.position[1];
 
     return Math.sqrt(dx * dx + dy * dy);
-}
+};
 
-async function areUsersNearby(socketId1, socketId2) {
-    const users = await User.find({
-        socketId: { $in: [socketId1, socketId2] },
-    });
+// Format user data for frontend
+const formatUser = (user) => ({
+    userId: user.socketId,
+    username: user.username,
+    x: user.position[0],
+    y: user.position[1]
+});
 
-    if (users.length !== 2) return false;
-
-    return (
-        calculateDistance(users[0].position, users[1].position) <
-        PROXIMITY_RADIUS
-    );
-}
-
-function formatUser(user) {
-    return {
-        userId: user.socketId,
-        username: user.username,
-        x: user.position[0],
-        y: user.position[1],
-    };
-}
-
-async function broadcastProximityUpdates() {
-    const users = await User.find(
-        {},
-        { socketId: 1, username: 1, position: 1 }
-    );
-
-    for (const currentUser of users) {
-        const nearbyUsers = users
-            .filter((otherUser) => {
-                if (otherUser.socketId === currentUser.socketId) {
-                    return false;
-                }
-
-                return (
-                    calculateDistance(
-                        currentUser.position,
-                        otherUser.position
-                    ) < PROXIMITY_RADIUS
-                );
-            })
-            .map(formatUser);
-
-        io.to(currentUser.socketId).emit(
-            "proximity:update",
-            nearbyUsers
-        );
-    }
-}
-
-async function relayWebRTCEvent(socket, eventName, payload, dataKey) {
+// Check whether two users are nearby
+const areUsersNearby = async (socketId1, socketId2) => {
     try {
-        const { targetUserId } = payload || {};
-        const data = payload?.[dataKey];
+        const user1 = await User.findOne({ socketId: socketId1 });
+        const user2 = await User.findOne({ socketId: socketId2 });
 
-        if (
-            typeof targetUserId !== "string" ||
-            !targetUserId ||
-            !data
-        ) {
-            return;
+        if (!user1 || !user2) return false;
+
+        return calculateDistance(user1, user2) <= PROXIMITY_RADIUS;
+    } catch (error) {
+        console.error("Proximity check error:", error.message);
+        return false;
+    }
+};
+
+// Send proximity updates to all connected users
+const broadcastProximityUpdates = async () => {
+    try {
+        const users = await User.find();
+
+        for (const user of users) {
+            const nearbyUsers = [];
+
+            for (const otherUser of users) {
+                if (user.socketId === otherUser.socketId) continue;
+
+                const distance = calculateDistance(user, otherUser);
+
+                if (distance <= PROXIMITY_RADIUS) {
+                    nearbyUsers.push({
+                        userId: otherUser.socketId,
+                        username: otherUser.username,
+                        x: otherUser.position[0],
+                        y: otherUser.position[1]
+                    });
+                }
+            }
+
+            io.to(user.socketId).emit("proximity:update", nearbyUsers);
         }
+    } catch (error) {
+        console.error("Proximity update error:", error.message);
+    }
+};
 
-        const nearby = await areUsersNearby(
-            socket.id,
-            targetUserId
-        );
+// Validate and relay WebRTC events
+const relayWebRTCEvent = async (socket, eventName, data) => {
+    try {
+        if (!data || !data.target || !data.signal) return;
+
+        const nearby = await areUsersNearby(socket.id, data.target);
 
         if (!nearby) {
             socket.emit("webrtc:error", {
-                message: "User is outside the audio range.",
+                message: "Users must be within proximity to connect."
             });
             return;
         }
 
-        io.to(targetUserId).emit(eventName, {
-            senderUserId: socket.id,
-            [dataKey]: data,
+        io.to(data.target).emit(eventName, {
+            sender: socket.id,
+            signal: data.signal
         });
     } catch (error) {
-        console.error(`${eventName} error:`, error.message);
+        console.error(`WebRTC ${eventName} error:`, error.message);
     }
-}
+};
 
+// Socket.IO connection
 io.on("connection", async (socket) => {
     console.log("User connected:", socket.id);
 
     try {
+        // Create the new user
         const user = await User.create({
             socketId: socket.id,
             username: `User-${socket.id.slice(0, 5)}`,
-            position: [400, 250],
+            position: [400, 250]
         });
 
-        // Send all existing users to the newly connected user.
-        const existingUsers = await User.find(
-            { socketId: { $ne: socket.id } },
-            { socketId: 1, username: 1, position: 1 }
-        );
+        // Send existing users to the newly connected user
+        const existingUsers = await User.find({
+            socketId: { $ne: socket.id }
+        });
 
         socket.emit(
             "users:initial",
             existingUsers.map(formatUser)
         );
 
-        // Announce the new user to everyone else.
+        // Notify existing users about the new user
         socket.broadcast.emit("avatar:joined", formatUser(user));
 
-        console.log("User saved:", user.username);
-
+        // Update proximity
         await broadcastProximityUpdates();
-    } catch (error) {
-        console.error("User initialization error:", error.message);
-        socket.disconnect(true);
-        return;
-    }
 
-    // Avatar movement
-    socket.on("avatar:move", async ({ x, y } = {}) => {
-        try {
-            if (
-                !Number.isFinite(x) ||
-                !Number.isFinite(y) ||
-                x < AVATAR_SIZE ||
-                x > CANVAS_WIDTH - AVATAR_SIZE ||
-                y < AVATAR_SIZE ||
-                y > CANVAS_HEIGHT - AVATAR_SIZE
-            ) {
-                return;
-            }
+        // Handle avatar movement
+        socket.on("avatar:move", async ({ x, y }) => {
+            try {
+                if (
+                    typeof x !== "number" ||
+                    typeof y !== "number" ||
+                    !Number.isFinite(x) ||
+                    !Number.isFinite(y)
+                ) {
+                    return;
+                }
 
-            const user = await User.findOneAndUpdate(
-                { socketId: socket.id },
-                { $set: { position: [x, y] } },
-                { new: true }
-            );
+                const safeX = Math.max(
+                    AVATAR_SIZE,
+                    Math.min(CANVAS_WIDTH - AVATAR_SIZE, x)
+                );
 
-            if (!user) return;
+                const safeY = Math.max(
+                    AVATAR_SIZE,
+                    Math.min(CANVAS_HEIGHT - AVATAR_SIZE, y)
+                );
 
-            socket.broadcast.emit("avatar:moved", formatUser(user));
+                const updatedUser = await User.findOneAndUpdate(
+                    { socketId: socket.id },
+                    { position: [safeX, safeY] },
+                    { new: true }
+                );
 
-            await broadcastProximityUpdates();
-        } catch (error) {
-            console.error("Avatar movement error:", error.message);
-        }
-    });
+                if (!updatedUser) return;
 
-    // WebRTC signaling
-    socket.on("webrtc:offer", (payload) => {
-        relayWebRTCEvent(socket, "webrtc:offer", payload, "offer");
-    });
-
-    socket.on("webrtc:answer", (payload) => {
-        relayWebRTCEvent(socket, "webrtc:answer", payload, "answer");
-    });
-
-    socket.on("webrtc:ice-candidate", (payload) => {
-        relayWebRTCEvent(
-            socket,
-            "webrtc:ice-candidate",
-            payload,
-            "candidate"
-        );
-    });
-
-    // Disconnect
-    socket.on("disconnect", async () => {
-        try {
-            const user = await User.findOneAndDelete({
-                socketId: socket.id,
-            });
-
-            if (user) {
-                console.log("User disconnected:", user.username);
-
-                socket.broadcast.emit("avatar:left", {
-                    userId: socket.id,
-                });
+                // Broadcast movement to other users
+                socket.broadcast.emit("avatar:moved", formatUser(updatedUser));
 
                 await broadcastProximityUpdates();
+            } catch (error) {
+                console.error("Avatar movement error:", error.message);
             }
-        } catch (error) {
-            console.error("Disconnect cleanup error:", error.message);
-        }
-    });
+        });
+
+        // WebRTC signaling
+        socket.on("webrtc:offer", (data) => {
+            relayWebRTCEvent(socket, "webrtc:offer", data);
+        });
+
+        socket.on("webrtc:answer", (data) => {
+            relayWebRTCEvent(socket, "webrtc:answer", data);
+        });
+
+        socket.on("webrtc:ice-candidate", (data) => {
+            relayWebRTCEvent(socket, "webrtc:ice-candidate", data);
+        });
+
+        // Handle disconnection
+        socket.on("disconnect", async (reason) => {
+            try {
+                console.log("User disconnected:", socket.id, reason);
+
+                const deletedUser = await User.findOneAndDelete({
+                    socketId: socket.id
+                });
+
+                if (deletedUser) {
+                    socket.broadcast.emit("avatar:left", {
+                        userId: socket.id
+                    });
+                }
+
+                await broadcastProximityUpdates();
+            } catch (error) {
+                console.error("Disconnect error:", error.message);
+            }
+        });
+
+    } catch (error) {
+        console.error("Socket connection setup error:", error.message);
+        socket.disconnect(true);
+    }
 });
 
-async function startServer() {
+// Start server after MongoDB connection
+connectDB().then(async () => {
     try {
-        await connectDB();
+        // Remove stale records from previous server sessions.
+        // This assumes this server is the only process using this collection.
+        const result = await User.deleteMany({});
+        console.log(`Cleared ${result.deletedCount} old user records`);
 
         server.listen(PORT, () => {
-            console.log(`ProxiSpeak server running on port ${PORT}`);
+            console.log(`Server running on port ${PORT}`);
         });
     } catch (error) {
-        console.error("Server startup failed:", error.message);
+        console.error("Server startup error:", error.message);
         process.exit(1);
     }
-}
-
-startServer();
+});
