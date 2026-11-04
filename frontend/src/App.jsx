@@ -13,6 +13,49 @@ const socket = io("http://localhost:5000", {
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 500;
 const AVATAR_SIZE = 20;
+
+// Solid objects in the office
+const OBSTACLES = [
+    // Meeting room table
+    { x: 590, y: 75, width: 120, height: 55 },
+
+    // Meeting room chairs
+    { x: 570, y: 85, width: 15, height: 15 },
+    { x: 570, y: 115, width: 15, height: 15 },
+    { x: 725, y: 85, width: 15, height: 15 },
+    { x: 725, y: 115, width: 15, height: 15 },
+    { x: 625, y: 60, width: 15, height: 15 },
+    { x: 675, y: 145, width: 15, height: 15 },
+
+    // Desks and their chairs
+    ...[
+        [80, 100],
+        [220, 100],
+        [360, 100],
+        [80, 260],
+        [220, 260],
+        [360, 260]
+    ].flatMap(([x, y]) => [
+        { x, y, width: 90, height: 45 },
+        { x: x + 35, y: y + 55, width: 20, height: 20 }
+    ]),
+
+    // Plants
+    { x: 23, y: 426, width: 24, height: 24 },
+    { x: 448, y: 426, width: 24, height: 24 },
+    { x: 743, y: 446, width: 24, height: 24 },
+
+    // Reception desk
+    { x: 550, y: 240, width: 210, height: 65 },
+
+    // Meeting room walls, with an opening at the bottom
+    { x: 518, y: 18, width: 264, height: 5 },
+    { x: 518, y: 18, width: 5, height: 164 },
+    { x: 777, y: 18, width: 5, height: 164 },
+    { x: 518, y: 177, width: 92, height: 5 },
+    { x: 690, y: 177, width: 92, height: 5 }
+];
+
 const MOVE_SPEED = 5;
 const MOVEMENT_SMOOTHNESS = 0.08;
 const MOVE_EMIT_INTERVAL = 50;
@@ -137,12 +180,40 @@ function drawOffice(ctx) {
     ctx.fillText("ENTRANCE", 650, 460);
 }
 
+// Check whether a circular avatar collides with a rectangle
+function checkCollision(x, y, obstacle) {
+    const closestX = Math.max(
+        obstacle.x,
+        Math.min(x, obstacle.x + obstacle.width)
+    );
+
+    const closestY = Math.max(
+        obstacle.y,
+        Math.min(y, obstacle.y + obstacle.height)
+    );
+
+    const dx = x - closestX;
+    const dy = y - closestY;
+
+    return (
+        dx * dx + dy * dy <
+        AVATAR_SIZE * AVATAR_SIZE
+    );
+}
+
+// Check all office obstacles
+function isPositionBlocked(x, y) {
+    return OBSTACLES.some(obstacle =>
+        checkCollision(x, y, obstacle)
+    );
+}
+
 
 function App() {
     const canvasRef = useRef(null);
 
-    const positionRef = useRef({ x: 400, y: 250 });
-    const targetPosition = useRef({ x: 400, y: 250 });
+    const positionRef = useRef({ x: 500, y: 350 });
+    const targetPosition = useRef({ x: 500, y: 350 });
 
     const peerConnections = useRef({});
     const remoteAudioRefs = useRef({});
@@ -153,8 +224,8 @@ function App() {
     const lastMoveEmit = useRef(0);
 
     const [position, setPosition] = useState({
-        x: 400,
-        y: 250
+        x: 500,
+        y: 350
     });
 
     const [otherUsers, setOtherUsers] = useState([]);
@@ -626,46 +697,77 @@ useEffect(() => {
     }, [position, nearbyUsers]);
 
     // Smooth movement animation
-    useEffect(() => {
-        let animationId;
-        let lastFrameTime = 0;
+    // Smooth movement with collision detection
+useEffect(() => {
+    let animationId;
+    let lastFrameTime = 0;
 
-        const animate = (timestamp) => {
-            const current = positionRef.current;
-            const target = targetPosition.current;
+    const animate = (timestamp) => {
+        const current = positionRef.current;
+        const target = targetPosition.current;
 
-            const dx = target.x - current.x;
-            const dy = target.y - current.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
+        const dx = target.x - current.x;
+        const dy = target.y - current.y;
 
-            if (distance > 0.5) {
-                const newPosition = {
-                    x: current.x + dx * MOVEMENT_SMOOTHNESS,
-                    y: current.y + dy * MOVEMENT_SMOOTHNESS
-                };
+        let newX = current.x;
+        let newY = current.y;
 
-                positionRef.current = newPosition;
-                setPosition(newPosition);
+        // Calculate next horizontal position
+        const proposedX =
+            current.x + dx * MOVEMENT_SMOOTHNESS;
 
-                if (
-                    timestamp - lastFrameTime >= MOVE_EMIT_INTERVAL
-                ) {
-                    socket.emit("avatar:move", newPosition);
-                    lastFrameTime = timestamp;
-                }
-            } else if (distance > 0) {
-                positionRef.current = target;
-                setPosition(target);
-                socket.emit("avatar:move", target);
-            }
+        if (!isPositionBlocked(proposedX, current.y)) {
+            newX = proposedX;
+        }
 
-            animationId = requestAnimationFrame(animate);
+        // Calculate next vertical position
+        const proposedY =
+            current.y + dy * MOVEMENT_SMOOTHNESS;
+
+        if (!isPositionBlocked(newX, proposedY)) {
+            newY = proposedY;
+        }
+
+        const newPosition = {
+            x: newX,
+            y: newY
         };
 
-        animationId = requestAnimationFrame(animate);
+        const moved =
+            newX !== current.x ||
+            newY !== current.y;
 
-        return () => cancelAnimationFrame(animationId);
-    }, []);
+        if (moved) {
+            positionRef.current = newPosition;
+            setPosition(newPosition);
+
+            if (
+                timestamp - lastFrameTime >= MOVE_EMIT_INTERVAL
+            ) {
+                socket.emit("avatar:move", newPosition);
+                lastFrameTime = timestamp;
+            }
+        }
+
+        // Stop when the target is reached or movement is blocked
+        const remainingX = target.x - newX;
+        const remainingY = target.y - newY;
+
+        if (
+            Math.abs(remainingX) < 0.5 &&
+            Math.abs(remainingY) < 0.5
+        ) {
+            positionRef.current = target;
+            setPosition(target);
+        }
+
+        animationId = requestAnimationFrame(animate);
+    };
+
+    animationId = requestAnimationFrame(animate);
+
+    return () => cancelAnimationFrame(animationId);
+}, []);
 
     // Mouse click movement
     const handleCanvasClick = (event) => {
