@@ -208,12 +208,39 @@ function isPositionBlocked(x, y) {
     );
 }
 
+// Find a random safe starting position
+function getSafeSpawnPosition() {
+    const minX = 40;
+    const maxX = CANVAS_WIDTH - 40;
+    const minY = 40;
+    const maxY = CANVAS_HEIGHT - 40;
+
+    for (let i = 0; i < 100; i++) {
+        const x = Math.floor(
+            Math.random() * (maxX - minX + 1) + minX
+        );
+
+        const y = Math.floor(
+            Math.random() * (maxY - minY + 1) + minY
+        );
+
+        if (!isPositionBlocked(x, y)) {
+            return { x, y };
+        }
+    }
+
+    // Fallback position
+    return { x: 500, y: 350 };
+}
+
 
 function App() {
+    const [initialPosition] = useState(
+    () => getSafeSpawnPosition()
+);
     const canvasRef = useRef(null);
-
-    const positionRef = useRef({ x: 500, y: 350 });
-    const targetPosition = useRef({ x: 500, y: 350 });
+    const positionRef = useRef(initialPosition);
+    const targetPosition = useRef(initialPosition);
 
     const peerConnections = useRef({});
     const remoteAudioRefs = useRef({});
@@ -223,10 +250,7 @@ function App() {
     const makingOffer = useRef({});
     const lastMoveEmit = useRef(0);
 
-    const [position, setPosition] = useState({
-        x: 500,
-        y: 350
-    });
+    const [position, setPosition] = useState(initialPosition);
 
     const [otherUsers, setOtherUsers] = useState([]);
     const [nearbyUsers, setNearbyUsers] = useState([]);
