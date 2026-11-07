@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
@@ -59,7 +58,6 @@ const OBSTACLES = [
 const MOVE_SPEED = 5;
 const MOVEMENT_SMOOTHNESS = 0.08;
 const MOVE_EMIT_INTERVAL = 50;
-
 
 function drawOffice(ctx) {
     // Office floor
@@ -208,6 +206,19 @@ function isPositionBlocked(x, y) {
     );
 }
 
+// Check collision with other avatars
+function isAvatarBlocked(x, y, users) {
+    return users.some((user) => {
+        const dx = x - user.x;
+        const dy = y - user.y;
+
+        const distanceSquared = dx * dx + dy * dy;
+        const minimumDistance = AVATAR_SIZE * 2;
+
+        return distanceSquared < minimumDistance * minimumDistance;
+    });
+}
+
 // Find a random safe starting position
 function getSafeSpawnPosition() {
     const minX = 40;
@@ -233,11 +244,11 @@ function getSafeSpawnPosition() {
     return { x: 500, y: 350 };
 }
 
-
 function App() {
     const [initialPosition] = useState(
-    () => getSafeSpawnPosition()
-);
+        () => getSafeSpawnPosition()
+    );
+
     const canvasRef = useRef(null);
     const positionRef = useRef(initialPosition);
     const targetPosition = useRef(initialPosition);
@@ -253,6 +264,12 @@ function App() {
     const [position, setPosition] = useState(initialPosition);
 
     const [otherUsers, setOtherUsers] = useState([]);
+    const otherUsersRef = useRef([]);
+
+    useEffect(() => {
+        otherUsersRef.current = otherUsers;
+    }, [otherUsers]);
+
     const [nearbyUsers, setNearbyUsers] = useState([]);
     const [isMicOn, setIsMicOn] = useState(false);
     const [errorMessage, setErrorMessage] = useState("");
@@ -475,65 +492,67 @@ function App() {
 
     }, [position, otherUsers, nearbyUsers]);
 
-    
-// Receive and synchronize users
-useEffect(() => {
-    const handleInitialUsers = (users) => {
-        console.log("INITIAL USERS RECEIVED:", users);
-        setOtherUsers(users);
-    
-    };
+    // Receive and synchronize users
+    useEffect(() => {
+        const handleInitialUsers = (users) => {
+            console.log("INITIAL USERS RECEIVED:", users);
+            setOtherUsers(users);
+        };
 
-    const handleAvatarJoined = (user) => {
-    console.log("NEW USER JOINED:", user);
+        const handleAvatarJoined = (user) => {
+            console.log("NEW USER JOINED:", user);
 
-    setOtherUsers((previousUsers) => {
-        if (previousUsers.some((item) => item.userId === user.userId)) {
-            return previousUsers;
-        }
+            setOtherUsers((previousUsers) => {
+                if (
+                    previousUsers.some(
+                        (item) => item.userId === user.userId
+                    )
+                ) {
+                    return previousUsers;
+                }
 
-        return [...previousUsers, user];
-    });
-};
-    const handleAvatarMoved = (user) => {
-        setOtherUsers((previousUsers) => {
-            const exists = previousUsers.some(
-                (item) => item.userId === user.userId
+                return [...previousUsers, user];
+            });
+        };
+
+        const handleAvatarMoved = (user) => {
+            setOtherUsers((previousUsers) => {
+                const exists = previousUsers.some(
+                    (item) => item.userId === user.userId
+                );
+
+                if (exists) {
+                    return previousUsers.map((item) =>
+                        item.userId === user.userId ? user : item
+                    );
+                }
+
+                return [...previousUsers, user];
+            });
+        };
+
+        const handleAvatarLeft = ({ userId }) => {
+            setOtherUsers((previousUsers) =>
+                previousUsers.filter(
+                    (user) => user.userId !== userId
+                )
             );
 
-            if (exists) {
-                return previousUsers.map((item) =>
-                    item.userId === user.userId ? user : item
-                );
-            }
+            cleanupPeerConnection(userId);
+        };
 
-            return [...previousUsers, user];
-        });
-    };
+        socket.on("users:initial", handleInitialUsers);
+        socket.on("avatar:joined", handleAvatarJoined);
+        socket.on("avatar:moved", handleAvatarMoved);
+        socket.on("avatar:left", handleAvatarLeft);
 
-    const handleAvatarLeft = ({ userId }) => {
-        setOtherUsers((previousUsers) =>
-            previousUsers.filter(
-                (user) => user.userId !== userId
-            )
-        );
-
-        cleanupPeerConnection(userId);
-    };
-
-    socket.on("users:initial", handleInitialUsers);
-    socket.on("avatar:joined", handleAvatarJoined);
-    socket.on("avatar:moved", handleAvatarMoved);
-    socket.on("avatar:left", handleAvatarLeft);
-
-    return () => {
-        socket.off("users:initial", handleInitialUsers);
-        socket.off("avatar:joined", handleAvatarJoined);
-        socket.off("avatar:moved", handleAvatarMoved);
-        socket.off("avatar:left", handleAvatarLeft);
-    };
-}, [cleanupPeerConnection]);
-
+        return () => {
+            socket.off("users:initial", handleInitialUsers);
+            socket.off("avatar:joined", handleAvatarJoined);
+            socket.off("avatar:moved", handleAvatarMoved);
+            socket.off("avatar:left", handleAvatarLeft);
+        };
+    }, [cleanupPeerConnection]);
 
     // Handle nearby users
     useEffect(() => {
@@ -720,78 +739,96 @@ useEffect(() => {
         });
     }, [position, nearbyUsers]);
 
-    // Smooth movement animation
     // Smooth movement with collision detection
-useEffect(() => {
-    let animationId;
-    let lastFrameTime = 0;
+    useEffect(() => {
+        let animationId;
+        let lastFrameTime = 0;
 
-    const animate = (timestamp) => {
-        const current = positionRef.current;
-        const target = targetPosition.current;
+        const animate = (timestamp) => {
+            const current = positionRef.current;
+            const target = targetPosition.current;
 
-        const dx = target.x - current.x;
-        const dy = target.y - current.y;
+            const dx = target.x - current.x;
+            const dy = target.y - current.y;
 
-        let newX = current.x;
-        let newY = current.y;
+            let newX = current.x;
+            let newY = current.y;
 
-        // Calculate next horizontal position
-        const proposedX =
-            current.x + dx * MOVEMENT_SMOOTHNESS;
-
-        if (!isPositionBlocked(proposedX, current.y)) {
-            newX = proposedX;
-        }
-
-        // Calculate next vertical position
-        const proposedY =
-            current.y + dy * MOVEMENT_SMOOTHNESS;
-
-        if (!isPositionBlocked(newX, proposedY)) {
-            newY = proposedY;
-        }
-
-        const newPosition = {
-            x: newX,
-            y: newY
-        };
-
-        const moved =
-            newX !== current.x ||
-            newY !== current.y;
-
-        if (moved) {
-            positionRef.current = newPosition;
-            setPosition(newPosition);
+            // Horizontal movement
+            const proposedX = current.x + dx * MOVEMENT_SMOOTHNESS;
 
             if (
-                timestamp - lastFrameTime >= MOVE_EMIT_INTERVAL
+                !isPositionBlocked(proposedX, current.y) &&
+                !isAvatarBlocked(
+                    proposedX,
+                    current.y,
+                    otherUsersRef.current
+                )
             ) {
-                socket.emit("avatar:move", newPosition);
-                lastFrameTime = timestamp;
+                newX = proposedX;
             }
-        }
 
-        // Stop when the target is reached or movement is blocked
-        const remainingX = target.x - newX;
-        const remainingY = target.y - newY;
+            // Vertical movement
+            const proposedY = current.y + dy * MOVEMENT_SMOOTHNESS;
 
-        if (
-            Math.abs(remainingX) < 0.5 &&
-            Math.abs(remainingY) < 0.5
-        ) {
-            positionRef.current = target;
-            setPosition(target);
-        }
+            if (
+                !isPositionBlocked(newX, proposedY) &&
+                !isAvatarBlocked(
+                    newX,
+                    proposedY,
+                    otherUsersRef.current
+                )
+            ) {
+                newY = proposedY;
+            }
+
+            const newPosition = {
+                x: newX,
+                y: newY
+            };
+
+            const moved =
+                newX !== current.x ||
+                newY !== current.y;
+
+            if (moved) {
+                positionRef.current = newPosition;
+                setPosition(newPosition);
+
+                if (
+                    timestamp - lastFrameTime >= MOVE_EMIT_INTERVAL
+                ) {
+                    socket.emit("avatar:move", newPosition);
+                    lastFrameTime = timestamp;
+                }
+            }
+
+            // Snap to target only if the target is safe
+            const remainingX = target.x - newX;
+            const remainingY = target.y - newY;
+
+            if (
+                Math.abs(remainingX) < 0.5 &&
+                Math.abs(remainingY) < 0.5 &&
+                !isPositionBlocked(target.x, target.y) &&
+                !isAvatarBlocked(
+                    target.x,
+                    target.y,
+                    otherUsersRef.current
+                )
+            ) {
+                positionRef.current = target;
+                setPosition(target);
+                socket.emit("avatar:move", target);
+            }
+
+            animationId = requestAnimationFrame(animate);
+        };
 
         animationId = requestAnimationFrame(animate);
-    };
 
-    animationId = requestAnimationFrame(animate);
-
-    return () => cancelAnimationFrame(animationId);
-}, []);
+        return () => cancelAnimationFrame(animationId);
+    }, []);
 
     // Mouse click movement
     const handleCanvasClick = (event) => {
@@ -903,23 +940,23 @@ useEffect(() => {
 
     // Cleanup on unmount
     useEffect(() => {
-    // Connect only after all socket event listeners are registered.
-    socket.connect();
+        // Connect only after all socket event listeners are registered.
+        socket.connect();
 
-    return () => {
-        Object.keys(peerConnections.current).forEach(
-            cleanupPeerConnection
-        );
-
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(
-                (track) => track.stop()
+        return () => {
+            Object.keys(peerConnections.current).forEach(
+                cleanupPeerConnection
             );
-        }
 
-        socket.disconnect();
-    };
-}, [cleanupPeerConnection]);
+            if (localStreamRef.current) {
+                localStreamRef.current.getTracks().forEach(
+                    (track) => track.stop()
+                );
+            }
+
+            socket.disconnect();
+        };
+    }, [cleanupPeerConnection]);
 
     return (
         <div style={{ padding: "20px", fontFamily: "Arial" }}>
