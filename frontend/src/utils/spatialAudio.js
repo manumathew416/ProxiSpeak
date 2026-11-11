@@ -1,70 +1,108 @@
 
-const MAX_AUDIBLE_DISTANCE = 100;
+const PIXELS_PER_METER = 100;
 
-export function calculateDistance(user1, user2) {
-    const dx = user1.x - user2.x;
-    const dy = user1.y - user2.y;
+const MAX_DISTANCE = 8;
 
-    return Math.sqrt(dx * dx + dy * dy);
-}
+export function createSpatialAudio(audio) {
+  if (!audio) {
+    throw new Error("Audio element is required");
+  }
 
-export function calculateVolume(distance) {
-    if (distance >= MAX_AUDIBLE_DISTANCE) return 0;
-    if (distance <= 0) return 1;
+  const AudioContextClass =
+    window.AudioContext || window.webkitAudioContext;
 
-    return 1 - distance / MAX_AUDIBLE_DISTANCE;
-}
+  if (!AudioContextClass) {
+    throw new Error("Web Audio API is not supported");
+  }
 
-export function createSpatialAudio(audioElement) {
-    const audioContext = new AudioContext();
+  const audioContext = new AudioContextClass();
 
-    const source = audioContext.createMediaElementSource(audioElement);
-    const gainNode = audioContext.createGain();
-    const pannerNode = audioContext.createStereoPanner();
+  const source = audioContext.createMediaElementSource(audio);
 
-    source.connect(gainNode);
-    gainNode.connect(pannerNode);
-    pannerNode.connect(audioContext.destination);
+  const panner = audioContext.createPanner();
 
-    return {
-        audioContext,
-        gainNode,
-        pannerNode,
-    };
+  const gain = audioContext.createGain();
+
+  // Spatial audio configuration
+  panner.panningModel = "HRTF";
+  panner.distanceModel = "inverse";
+
+  panner.refDistance = 1;
+  panner.maxDistance = MAX_DISTANCE;
+  panner.rolloffFactor = 1.5;
+
+  // Initial position
+  panner.positionX.value = 0;
+  panner.positionY.value = 0;
+  panner.positionZ.value = -1;
+
+  // Audio volume
+  gain.gain.value = 1;
+
+  // Connect audio nodes
+  source.connect(panner);
+  panner.connect(gain);
+  gain.connect(audioContext.destination);
+
+  // Resume audio context when playback starts
+  const resumeAudio = () => {
+    if (audioContext.state === "suspended") {
+      audioContext.resume().catch(console.error);
+    }
+  };
+
+  audio.addEventListener("play", resumeAudio);
+
+  return {
+    audio,
+    audioContext,
+    source,
+    panner,
+    gain,
+    resumeAudio,
+  };
 }
 
 export function updateSpatialAudio(
-    spatialAudio,
-    localPosition,
-    remotePosition
+  spatialAudio,
+  listenerPosition,
+  remoteUserPosition
 ) {
-    if (!spatialAudio) return;
+  if (!spatialAudio || !listenerPosition || !remoteUserPosition) {
+    return;
+  }
 
-    const distance = calculateDistance(
-        localPosition,
-        remotePosition
-    );
+  const { panner, audioContext } = spatialAudio;
 
-    const volume = calculateVolume(distance);
+  const currentTime = audioContext.currentTime;
 
-    // Left and right direction
-    const horizontalDifference =
-        remotePosition.x - localPosition.x;
+  // Calculate distance between users
+  const deltaX =
+    remoteUserPosition.x - listenerPosition.x;
 
-    const pan = Math.max(
-        -1,
-        Math.min(1, horizontalDifference / MAX_AUDIBLE_DISTANCE)
-    );
+  const deltaY =
+    remoteUserPosition.y - listenerPosition.y;
 
-    spatialAudio.gainNode.gain.setTargetAtTime(
-        volume,
-        spatialAudio.audioContext.currentTime,
-        0.05
-    );
+  // Convert canvas coordinates into audio coordinates
+  const x = deltaX / PIXELS_PER_METER;
+  const z = deltaY / PIXELS_PER_METER;
 
-    spatialAudio.pannerNode.pan.setTargetAtTime(
-        pan,
-        spatialAudio.audioContext.currentTime,
-        0.05
-    );
+  // Smoothly update the 3D audio position
+  panner.positionX.setTargetAtTime(
+    x,
+    currentTime,
+    0.1
+  );
+
+  panner.positionY.setTargetAtTime(
+    0,
+    currentTime,
+    0.1
+  );
+
+  panner.positionZ.setTargetAtTime(
+    z,
+    currentTime,
+    0.1
+  );
 }
